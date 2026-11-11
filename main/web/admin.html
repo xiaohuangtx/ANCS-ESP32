@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ANCS-ESP32 管理后台</title>
+<style>
+:root { --bg:#f4f5f7; --card:#fff; --text:#1f2329; --muted:#8a919f; --line:#e5e6eb; --primary:#3370ff; --danger:#f54a45; --ok:#34c724; }
+* { box-sizing:border-box; }
+body { margin:0; font:14px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); }
+header { background:#1f2329; color:#fff; padding:12px 20px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+header h1 { font-size:17px; margin:0; font-weight:600; }
+header .ver { color:#aab; font-size:12px; }
+nav { display:flex; gap:4px; background:var(--card); border-bottom:1px solid var(--line); padding:0 12px; overflow-x:auto; }
+nav a { padding:12px 14px; color:var(--muted); text-decoration:none; border-bottom:2px solid transparent; white-space:nowrap; cursor:pointer; }
+nav a.active { color:var(--primary); border-bottom-color:var(--primary); font-weight:600; }
+main { max-width:960px; margin:0 auto; padding:16px; }
+section { display:none; }
+section.active { display:block; }
+.card { background:var(--card); border-radius:8px; padding:16px 20px; margin-bottom:16px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+.card h2 { font-size:15px; margin:0 0 12px; display:flex; align-items:center; gap:8px; }
+.card h2 .spacer { flex:1; }
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px 24px; }
+.kv .k { color:var(--muted); font-size:12px; }
+.kv .v { font-size:15px; word-break:break-all; }
+label { display:block; margin:12px 0 4px; color:var(--muted); font-size:13px; }
+input[type=text],input[type=password],input[type=number],input[type=url] { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; font-size:14px; }
+input:focus { outline:none; border-color:var(--primary); }
+.hint { color:var(--muted); font-size:12px; margin-top:4px; }
+button { padding:7px 16px; border-radius:6px; border:1px solid var(--line); background:#fff; cursor:pointer; font-size:14px; }
+button.primary { background:var(--primary); border-color:var(--primary); color:#fff; }
+button.danger { color:var(--danger); border-color:var(--danger); }
+button:disabled { opacity:.5; cursor:not-allowed; }
+.actions { margin-top:16px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+.msg { font-size:13px; }
+.msg.ok { color:var(--ok); } .msg.err { color:var(--danger); }
+.badge { display:inline-block; padding:0 8px; border-radius:10px; font-size:12px; background:#eef3ff; color:var(--primary); }
+.badge.gray { background:#f0f1f5; color:var(--muted); }
+.badge.red { background:#fff0f0; color:var(--danger); }
+.notif { border-top:1px solid var(--line); padding:12px 0; }
+.notif:first-of-type { border-top:none; }
+.notif .head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.notif .app { font-weight:600; }
+.notif .time { color:var(--muted); font-size:12px; margin-left:auto; }
+.notif .title { margin-top:4px; font-weight:500; }
+.notif .body { margin-top:2px; white-space:pre-wrap; word-break:break-word; }
+.notif .meta { margin-top:4px; color:var(--muted); font-size:12px; }
+.empty { color:var(--muted); text-align:center; padding:32px 0; }
+.progress { height:8px; background:#eef0f4; border-radius:4px; overflow:hidden; margin-top:12px; display:none; }
+.progress div { height:100%; width:0; background:var(--primary); transition:width .2s; }
+.file { border:1px dashed var(--line); border-radius:8px; padding:20px; text-align:center; cursor:pointer; color:var(--muted); }
+.file:hover { border-color:var(--primary); }
+.file input { display:none; }
+</style>
+</head>
+<body>
+<header><h1 id="devname">ANCS-ESP32</h1><span class="ver" id="hdrver"></span></header>
+<nav>
+  <a data-tab="overview" class="active">概览</a>
+  <a data-tab="notifications">通知记录</a>
+  <a data-tab="settings">设置</a>
+  <a data-tab="ota">固件升级</a>
+  <a data-tab="system">系统</a>
+</nav>
+<main>
+
+<section id="overview" class="active">
+  <div class="card"><h2>设备</h2><div class="grid" id="dev"></div></div>
+  <div class="card"><h2>网络与蓝牙</h2><div class="grid" id="net"></div></div>
+  <div class="card"><h2>内存</h2><div class="grid" id="mem"></div></div>
+</section>
+
+<section id="notifications">
+  <div class="card">
+    <h2>通知记录 <span class="badge gray" id="ncount"></span><span class="spacer"></span>
+      <button id="nrefresh">刷新</button><button class="danger" id="nclear">清空</button></h2>
+    <div id="nlist"><div class="empty">加载中…</div></div>
+  </div>
+</section>
+
+<section id="settings">
+  <div class="card">
+    <h2>Webhook</h2>
+    <label>URL（留空则关闭）</label>
+    <input type="url" id="whurl" placeholder="https://example.com/ancs">
+    <label>Authorization 请求头（可选）</label>
+    <input type="text" id="whauth" placeholder="Bearer xxxxxx">
+    <div class="hint">每条通知以 JSON 格式 POST 到该地址。测试会先保存再发送一条 event 为 "test" 的示例通知。</div>
+    <div class="actions"><button class="primary" id="whsave">保存</button><button id="whtest">保存并测试</button><span class="msg" id="whmsg"></span></div>
+  </div>
+  <div class="card">
+    <h2>蓝牙</h2>
+    <label>同时连接的设备数量</label>
+    <input type="number" id="bmax" min="1">
+    <div class="hint" id="bmaxhint"></div>
+    <div class="actions"><button class="primary" id="bsave">保存</button><span class="msg" id="bmsg"></span></div>
+  </div>
+  <div class="card">
+    <h2>通知记录</h2>
+    <label>保存条数</label>
+    <input type="number" id="hsize" min="1" max="100">
+    <div class="hint" id="hsizehint">只保存在内存中，重启后清空。</div>
+    <div class="actions"><button class="primary" id="hsave">保存</button><span class="msg" id="hmsg"></span></div>
+  </div>
+  <div class="card">
+    <h2>管理密码 <span class="badge" id="pwstate"></span></h2>
+    <div class="hint">设置后访问本页面需要登录，用户名为 admin。</div>
+    <label>新密码</label><input type="password" id="pw1" autocomplete="new-password">
+    <label>确认新密码</label><input type="password" id="pw2" autocomplete="new-password">
+    <div class="actions"><button class="primary" id="pwsave">设置密码</button><button class="danger" id="pwclear">取消密码</button><span class="msg" id="pwmsg"></span></div>
+  </div>
+</section>
+
+<section id="ota">
+  <div class="card">
+    <h2>固件升级</h2>
+    <div class="grid" id="otainfo"></div>
+    <label class="file" id="drop" style="margin-top:16px">
+      <input type="file" id="fw" accept=".bin">
+      <span id="fwname">点击选择固件文件（build/ancs-esp32.bin）</span>
+    </label>
+    <div class="progress" id="prog"><div></div></div>
+    <div class="actions"><button class="primary" id="upload" disabled>开始升级</button><span class="msg" id="otamsg"></span></div>
+    <div class="hint">升级完成后设备自动重启。新固件连上 Wi-Fi 后才会被确认，若新固件启动失败会自动回滚到当前版本。</div>
+  </div>
+</section>
+
+<section id="system">
+  <div class="card">
+    <h2>系统操作</h2>
+    <div class="actions">
+      <button id="reboot">重启设备</button>
+      <button class="danger" id="bonds">清除蓝牙配对</button>
+      <button class="danger" id="wificfg">重新配网</button>
+      <span class="msg" id="sysmsg"></span>
+    </div>
+    <div class="hint">清除蓝牙配对后需要在 iPhone 上「忽略此设备」再重新配对。重新配网会断开当前 Wi-Fi 并开启配网热点，本页面将无法访问。</div>
+  </div>
+</section>
+
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const CATEGORY = { Other:'其他', IncomingCall:'来电', MissedCall:'未接来电', Voicemail:'语音留言', Social:'社交', Schedule:'日程',
+  Email:'邮件', News:'新闻', HealthAndFitness:'健康', BusinessAndFinance:'财务', Location:'位置', Entertainment:'娱乐' };
+let status = null, timer = null;
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, opts);
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+  return data;
+}
+function postJson(path, body) {
+  return api(path, { method:'POST', headers:{'Content-Type':'application/json'}, body: body ? JSON.stringify(body) : '' });
+}
+function show(id, text, ok) { const e = $(id); e.textContent = text; e.className = 'msg ' + (ok ? 'ok' : 'err'); }
+function kv(items) {
+  return items.map(([k, v]) => `<div class="kv"><div class="k">${k}</div><div class="v">${esc(v)}</div></div>`).join('');
+}
+function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+function kb(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.round(n / 1024) + ' KB'; }
+function duration(s) {
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return (d ? d + ' 天 ' : '') + (d || h ? h + ' 小时 ' : '') + m + ' 分钟';
+}
+function ago(s) {
+  if (s < 60) return '刚刚';
+  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+  if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+  return Math.floor(s / 86400) + ' 天前';
+}
+function rssi(v) { return v ? v + ' dBm' + (v > -60 ? '（强）' : v > -75 ? '（中）' : '（弱）') : '-'; }
+
+function switchTab(name) {
+  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.tab === name));
+  document.querySelectorAll('section').forEach(s => s.classList.toggle('active', s.id === name));
+  clearInterval(timer);
+  const refresh = { overview: loadStatus, notifications: loadNotifications, ota: loadStatus }[name];
+  if (name === 'settings') loadConfig();
+  if (refresh) { refresh(); timer = setInterval(refresh, name === 'notifications' ? 5000 : 10000); }
+}
+document.querySelectorAll('nav a').forEach(a => a.onclick = () => switchTab(a.dataset.tab));
+
+async function loadStatus() {
+  try { status = await api('/api/status'); } catch (e) { return; }
+  const s = status;
+  $('hdrver').textContent = 'v' + s.version;
+  if (s.ble.name) { $('devname').textContent = s.ble.name; document.title = s.ble.name + ' 管理后台'; }
+  $('dev').innerHTML = kv([['固件版本', s.version], ['编译时间', s.build_time], ['ESP-IDF', s.idf_version],
+    ['芯片', s.chip], ['MAC', s.mac], ['运行时间', duration(s.uptime)]]);
+  $('net').innerHTML = kv([['蓝牙名称', s.ble.name || '-'], ['Wi-Fi', s.wifi.ssid || '-'], ['IP 地址', s.wifi.ip || '-'], ['信号', rssi(s.wifi.rssi)],
+    ['蓝牙连接', s.ble.connections + ' / ' + s.ble.max_connections], ['Webhook', s.webhook_enabled ? '已开启' : '未配置'],
+    ['通知记录', s.notification_count + ' / ' + s.history_size]]);
+  const mem = [['内部 RAM 可用', kb(s.heap.internal_free) + ' / ' + kb(s.heap.internal_total)], ['内部 RAM 最低', kb(s.heap.internal_min)]];
+  if (s.heap.psram_total) mem.push(['PSRAM 可用', kb(s.heap.psram_free) + ' / ' + kb(s.heap.psram_total)]);
+  $('mem').innerHTML = kv(mem);
+  $('otainfo').innerHTML = kv([['当前版本', s.version], ['当前分区', s.ota.running], ['写入分区', s.ota.next || '无'],
+    ['最大固件大小', kb(s.ota.max_size)]]);
+}
+
+async function loadNotifications() {
+  let data;
+  try { data = await api('/api/notifications'); } catch (e) { $('nlist').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  $('ncount').textContent = data.items.length + ' / ' + data.capacity;
+  if (!data.items.length) { $('nlist').innerHTML = '<div class="empty">暂无通知</div>'; return; }
+  $('nlist').innerHTML = data.items.map(n => {
+    const app = n.app_name || n.app_id || '未知应用';
+    const badges = [`<span class="badge">${esc(CATEGORY[n.category] || n.category)}</span>`];
+    if (n.event === 'modified') badges.push('<span class="badge gray">已更新</span>');
+    if (n.flags.important) badges.push('<span class="badge red">重要</span>');
+    if (n.flags.pre_existing) badges.push('<span class="badge gray">历史</span>');
+    const date = n.date ? n.date.replace('T', ' ').slice(5, 16) : '';
+    const title = [n.title, n.subtitle].filter(Boolean).join(' · ');
+    return `<div class="notif">
+      <div class="head"><span class="app">${esc(app)}</span>${badges.join('')}<span class="time" title="${esc(n.date)}">${esc(date)} · ${ago(n.received_ago)}</span></div>
+      ${title ? `<div class="title">${esc(title)}</div>` : ''}
+      ${n.message ? `<div class="body">${esc(n.message)}</div>` : ''}
+      <div class="meta">来自 ${esc(n.peer_name || n.peer_address)}${n.message_size > (n.message || '').length ? ' · 内容已截断' : ''}</div>
+    </div>`;
+  }).join('');
+}
+$('nrefresh').onclick = loadNotifications;
+$('nclear').onclick = async () => {
+  if (!confirm('确定清空所有通知记录？')) return;
+  try { await api('/api/notifications', { method:'DELETE' }); } catch (e) { alert(e.message); }
+  loadNotifications();
+};
+
+async function loadConfig() {
+  let c;
+  try { c = await api('/api/config'); } catch (e) { return; }
+  $('whurl').value = c.webhook_url;
+  $('whauth').value = c.webhook_auth;
+  $('hsize').value = c.history_size;
+  $('hsize').min = c.history_size_min; $('hsize').max = c.history_size_max;
+  $('hsizehint').textContent = `范围 ${c.history_size_min}–${c.history_size_max}。只保存在内存中，重启后清空。`;
+  $('bmax').value = c.ble_max_connections;
+  $('bmax').max = c.ble_max_connections_limit;
+  $('bmaxhint').textContent = `范围 1–${c.ble_max_connections_limit}，立即生效。调小时已连接的设备不会被断开，只是不再接受新设备。`;
+  $('pwstate').textContent = c.has_password ? '已设置' : '未设置';
+  $('pwstate').className = 'badge' + (c.has_password ? '' : ' gray');
+  $('pwclear').style.display = c.has_password ? '' : 'none';
+}
+async function saveWebhook() {
+  await postJson('/api/config', { webhook_url: $('whurl').value.trim(), webhook_auth: $('whauth').value.trim() });
+}
+$('whsave').onclick = async () => {
+  try { await saveWebhook(); show('whmsg', '已保存', true); } catch (e) { show('whmsg', e.message); }
+};
+$('whtest').onclick = async () => {
+  $('whtest').disabled = true; show('whmsg', '发送中…', true);
+  try {
+    await saveWebhook();
+    const r = await postJson('/api/webhook/test');
+    if (r.success) show('whmsg', '测试成功，HTTP ' + r.status, true);
+    else show('whmsg', r.status > 0 ? '服务器返回 HTTP ' + r.status : '连接失败，请检查 URL 和网络');
+  } catch (e) { show('whmsg', e.message); }
+  $('whtest').disabled = false;
+};
+$('hsave').onclick = async () => {
+  try { await postJson('/api/config', { history_size: parseInt($('hsize').value, 10) }); show('hmsg', '已保存', true); loadConfig(); }
+  catch (e) { show('hmsg', e.message); }
+};
+$('bsave').onclick = async () => {
+  try { await postJson('/api/config', { ble_max_connections: parseInt($('bmax').value, 10) }); show('bmsg', '已保存', true); loadConfig(); }
+  catch (e) { show('bmsg', e.message); }
+};
+async function setPassword(pw) {
+  try {
+    await postJson('/api/config', { password: pw });
+    $('pw1').value = $('pw2').value = '';
+    show('pwmsg', pw ? '密码已设置，请使用 admin / 新密码重新登录' : '密码已取消', true);
+    if (pw) setTimeout(() => location.reload(), 1500); else loadConfig();
+  } catch (e) { show('pwmsg', e.message); }
+}
+$('pwsave').onclick = () => {
+  const p1 = $('pw1').value, p2 = $('pw2').value;
+  if (!p1) return show('pwmsg', '请输入新密码');
+  if (p1 !== p2) return show('pwmsg', '两次输入的密码不一致');
+  setPassword(p1);
+};
+$('pwclear').onclick = () => { if (confirm('取消密码后任何人都能访问本页面，确定？')) setPassword(''); };
+
+let fwFile = null;
+$('fw').onchange = () => {
+  fwFile = $('fw').files[0] || null;
+  $('fwname').textContent = fwFile ? `${fwFile.name}（${kb(fwFile.size)}）` : '点击选择固件文件';
+  $('upload').disabled = !fwFile;
+  $('otamsg').textContent = '';
+  if (fwFile && status && fwFile.size > status.ota.max_size) show('otamsg', '文件超过 OTA 分区大小');
+};
+$('upload').onclick = () => {
+  if (!fwFile || !confirm(`确定使用 ${fwFile.name} 升级固件？`)) return;
+  clearInterval(timer);
+  const oldVersion = status && status.version;
+  const bar = $('prog'), fill = bar.firstElementChild;
+  bar.style.display = 'block'; fill.style.width = '0';
+  $('upload').disabled = true; $('fw').disabled = true;
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/ota');
+  xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+  xhr.upload.onprogress = e => {
+    if (!e.lengthComputable) return;
+    const p = Math.round(e.loaded * 100 / e.total);
+    fill.style.width = p + '%';
+    show('otamsg', p < 100 ? `上传中 ${p}%` : '校验固件…', true);
+  };
+  const fail = msg => { show('otamsg', msg); $('upload').disabled = false; $('fw').disabled = false; };
+  xhr.onload = () => {
+    let r = {};
+    try { r = JSON.parse(xhr.responseText); } catch (e) {}
+    if (xhr.status !== 200) return fail('升级失败：' + (r.error || 'HTTP ' + xhr.status));
+    show('otamsg', '升级成功，设备正在重启…', true);
+    waitForReboot(oldVersion);
+  };
+  xhr.onerror = () => fail('上传失败，连接中断');
+  xhr.send(fwFile);
+};
+function waitForReboot(oldVersion) {
+  const start = Date.now();
+  const poll = async () => {
+    try {
+      const s = await api('/api/status');
+      if (s.uptime < (Date.now() - start) / 1000 + 5) {
+        show('otamsg', `设备已重启，当前版本 v${s.version}` + (oldVersion && s.version === oldVersion ? '（版本号未变化）' : ''), true);
+        $('fw').disabled = false;
+        return loadStatus();
+      }
+    } catch (e) {}
+    if (Date.now() - start > 90000) return show('otamsg', '等待设备重启超时，请稍后手动刷新页面');
+    setTimeout(poll, 2000);
+  };
+  setTimeout(poll, 3000);
+}
+
+$('reboot').onclick = async () => {
+  if (!confirm('确定重启设备？')) return;
+  try { await postJson('/api/reboot'); show('sysmsg', '设备正在重启，稍后刷新页面', true); } catch (e) { show('sysmsg', e.message); }
+};
+$('bonds').onclick = async () => {
+  if (!confirm('确定清除所有蓝牙配对？所有 iPhone / iPad 会断开连接。')) return;
+  try { await postJson('/api/ble/clear-bonds'); show('sysmsg', '蓝牙配对已清除', true); } catch (e) { show('sysmsg', e.message); }
+};
+$('wificfg').onclick = async () => {
+  if (!confirm('确定重新配网？设备会断开 Wi-Fi 并开启配网热点，本页面将无法访问。')) return;
+  try { await postJson('/api/wifi/config-mode'); show('sysmsg', '已进入配网模式，请连接设备热点并打开 http://192.168.4.1', true); }
+  catch (e) { show('sysmsg', e.message); }
+};
+
+switchTab('overview');
+</script>
+</body>
+</html>

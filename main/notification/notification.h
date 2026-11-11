@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <string>
 
+struct cJSON;
+
 /**
  * An iOS notification received through ANCS ("added" / "modified" events;
  * "removed" events are consumed internally and never emitted).
@@ -35,6 +37,8 @@ struct AncsNotification {
     void Print() const;
     // Serialize to the JSON body used by the webhook
     std::string ToJson() const;
+    // Same fields as ToJson(), the caller owns the returned object
+    cJSON* ToCJson() const;
 };
 
 #endif // NOTIFICATION_H

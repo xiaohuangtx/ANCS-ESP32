@@ -178,3 +178,11 @@ bool WifiService::IsInWifiConfigMode() const {
 std::string WifiService::GetIpAddress() const {
     return WifiManager::GetInstance().GetIpAddress();
 }
+
+std::string WifiService::GetSsid() const {
+    return WifiManager::GetInstance().GetSsid();
+}
+
+int WifiService::GetRssi() const {
+    return WifiManager::GetInstance().GetRssi();
+}

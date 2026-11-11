@@ -31,6 +31,8 @@ public:
     // Thread-safe, persisted to NVS. An empty URL disables the webhook.
     void SetUrl(const std::string& url);
     void SetAuthToken(const std::string& token);
+    std::string GetUrl();
+    std::string GetAuthToken();
 
     // Called on Wi-Fi connect / disconnect
     void SetNetworkReady(bool ready);
@@ -38,11 +40,16 @@ public:
     // Thread-safe, non-blocking. Drops the payload if the queue is full.
     void Post(const std::string& json);
 
+    // Blocking: POST a sample notification right away (bypassing the queue).
+    // Returns the HTTP status code, or -1 on a network error / no URL.
+    int SendTest();
+
 private:
     WebhookClient() = default;
 
     void Run();
-    bool Send(const std::string& body);
+    // Returns true when done (2xx, or a 4xx that will not succeed on retry)
+    bool Send(const std::string& body, int* status_code = nullptr);
 
     std::mutex mutex_;
     std::string url_;

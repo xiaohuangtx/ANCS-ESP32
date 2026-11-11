@@ -58,6 +58,15 @@ void AncsNotification::Print() const {
 }
 
 std::string AncsNotification::ToJson() const {
+    cJSON* root = ToCJson();
+    char* str = cJSON_PrintUnformatted(root);
+    std::string json(str ? str : "{}");
+    cJSON_free(str);
+    cJSON_Delete(root);
+    return json;
+}
+
+cJSON* AncsNotification::ToCJson() const {
     static const std::string device_id = GetDeviceId();
 
     cJSON* root = cJSON_CreateObject();
@@ -88,10 +97,5 @@ std::string AncsNotification::ToJson() const {
         cJSON_AddStringToObject(root, "positive_action", positive_action.c_str());
         cJSON_AddStringToObject(root, "negative_action", negative_action.c_str());
     }
-
-    char* str = cJSON_PrintUnformatted(root);
-    std::string json(str ? str : "{}");
-    cJSON_free(str);
-    cJSON_Delete(root);
-    return json;
+    return root;
 }

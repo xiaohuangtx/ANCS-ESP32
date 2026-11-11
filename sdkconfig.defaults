@@ -34,8 +34,9 @@ CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_BLUEDROID_ENABLED=n
 CONFIG_BT_NIMBLE_NVS_PERSIST=y
-# Up to 2 iPhones / iPads at the same time
-CONFIG_BT_NIMBLE_MAX_CONNECTIONS=2
+# Connection slots compiled in; how many are used (default 1) is set on the
+# admin page / CONFIG_BLE_MAX_CONNECTIONS
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=4
 # GATT client (needed for ANCS) is only compiled with the central role
 CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
 CONFIG_BT_NIMBLE_GATT_CLIENT=y

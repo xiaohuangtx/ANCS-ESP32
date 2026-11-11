@@ -6,11 +6,12 @@
 
 - BLE 外设广播 ANCS Service Solicitation，iPhone「设置 > 蓝牙」中可直接看到并连接
 - Just Works 绑定配对（含 IRK，兼容 iPhone 随机地址），重启后自动重连
-- 最多 2 台设备（iPhone / iPad）同时连接，每条通知都带有来源设备的名称和地址
+- 默认只连接 1 台设备（iPhone / iPad），可在管理后台改为最多 4 台同时连接，每条通知都带有来源设备的名称和地址
 - 完整 ANCS 客户端：服务发现 → 订阅 → 获取通知属性（App、标题、副标题、正文、时间、操作按钮）→ 查询 App 显示名称（带缓存）
 - Data Source 分包重组，Control Point 请求串行队列 + 超时
 - Wi-Fi：保存多个 SSID，无配置或连接超时自动开启配网热点
 - Webhook：独立任务 + 队列，Wi-Fi 断开时排队，失败重试，支持 HTTPS（内置证书包）
+- 管理后台：连上 Wi-Fi 后在 `http://<设备IP>/` 提供网页，可查看通知记录（默认保存最近 30 条）、配置 Webhook、上传固件升级（OTA）
 - BOOT 按键：长按进入 Wi-Fi 配网，三击清除 BLE 绑定
 
 ## 目录结构
@@ -34,7 +35,11 @@ ANCS-ESP32/
     │   └── wifi_service.* # Wi-Fi 连接 + 热点配网
     ├── notification/
     │   ├── notification.* # 通知数据结构、控制台打印、JSON 序列化
+    │   ├── notification_history.* # 最近通知记录（内存）
     │   └── webhook_client.*
+    ├── web/
+    │   ├── web_server.*   # 管理后台 HTTP 服务 + OTA
+    │   └── admin.html     # 管理后台页面（编译时嵌入固件）
     └── peripherals/
         └── button.*       # 按键封装
 ```
@@ -76,10 +81,25 @@ Actions  : [] / [清除]
 ===========================================================
 ```
 
+### 管理后台
+
+设备连上 Wi-Fi 后，串口会打印 `Admin page: http://192.168.x.x/`，用同一局域网内的电脑或手机浏览器打开即可：
+
+- **概览**：蓝牙名称（`ANCS-XXXXXX`，页面标题也会显示，方便区分多块板子）、固件版本、IP、Wi-Fi 信号、蓝牙连接数、内存
+- **通知记录**：最近收到的通知（默认 30 条，可在「设置」中改为 1–100 条），每 5 秒自动刷新。同一条通知的 `modified` 事件会覆盖之前的记录。记录只保存在内存中，重启后清空
+- **设置**：Webhook URL / Authorization（保存后立即生效，可发送测试通知）、蓝牙同时连接数量、通知保存条数、管理密码
+- **固件升级**：选择 `build/ancs-esp32.bin` 上传。设备会检查芯片型号和项目名，写入另一个 OTA 分区后自动重启；新固件连上 Wi-Fi、管理后台启动后才会被确认，如果新固件在此之前崩溃重启，bootloader 会自动回滚到旧版本
+- **系统**：重启、清除蓝牙配对、重新配网
+
+默认没有密码。设置管理密码后浏览器会弹出登录框，用户名 `admin`。也可在 menuconfig `ANCS-ESP32 Configuration > Admin web page` 中设置默认密码和默认保存条数（页面上修改的值保存在 NVS 中，优先级更高）。
+
+> 进入配网模式（长按 BOOT 键或页面上的「重新配网」）时管理后台会关闭，因为配网热点的网页使用同一个 80 端口。
+
 ### 多设备
 
-最多 2 台 iPhone / iPad 同时连接（`CONFIG_BT_NIMBLE_MAX_CONNECTIONS`），最多保存 4 台设备的配对（`CONFIG_BT_NIMBLE_MAX_BONDS`）。
-已有设备连接时 ESP32 会继续广播，第二台设备按同样步骤配对即可；两台都连上后停止广播，任意一台断开后恢复。
+默认只连接 1 台 iPhone / iPad，可在管理后台「设置 > 蓝牙」中改为 1–4 台，立即生效（保存在 NVS，默认值见 menuconfig `Bluetooth (ANCS) > Default number of devices connected at the same time`）。
+上限 4 由编译时的 `CONFIG_BT_NIMBLE_MAX_CONNECTIONS` 决定，最多保存 4 台设备的配对（`CONFIG_BT_NIMBLE_MAX_BONDS`）。
+允许多台时，已有设备连接后 ESP32 会继续广播，下一台设备按同样步骤配对即可；连满后停止广播，任意一台断开后恢复。调小数量时已连接的设备不会被断开，只是不再接受新设备。
 
 ### 常见问题
 
@@ -91,7 +111,7 @@ Actions  : [] / [清除]
 
 URL 为空时 Webhook 关闭。配置来源（优先级从高到低）：
 
-1. NVS：namespace `webhook`，key `url` / `auth`（代码中调用 `WebhookClient::GetInstance().SetUrl(...)` / `SetAuthToken(...)` 写入）
+1. NVS：namespace `webhook`，key `url` / `auth`（在管理后台「设置」页面修改，或代码中调用 `WebhookClient::GetInstance().SetUrl(...)` / `SetAuthToken(...)` 写入）
 2. menuconfig：`ANCS-ESP32 Configuration > Webhook`
 
 每条通知发送一次 `POST`，`Content-Type: application/json`，如配置了 token 则带 `Authorization` 头：
@@ -126,7 +146,7 @@ URL 为空时 Webhook 关闭。配置来源（优先级从高到低）：
 ```
 
 `device` 是 ESP32 的 MAC；`peer_name` / `peer_address` 标识通知来自哪台 iPhone / iPad（地址为绑定后的身份地址，重连不变）。
-`event` 取值为 `added` / `modified` / `removed`。`removed` 事件只包含 `uid`、`category` 与 `flags`，因为 iOS 不再提供已删除通知的内容。返回 2xx 视为成功；网络错误或 5xx 最多重试 3 次；4xx 不重试。
+`event` 取值为 `added` / `modified`；管理后台发送的测试通知为 `test`。返回 2xx 视为成功；网络错误或 5xx 最多重试 3 次；4xx 不重试。
 
 ## 扩展
 

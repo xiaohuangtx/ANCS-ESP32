@@ -18,13 +18,16 @@
  * iPhone lists it in Settings > Bluetooth. After the iPhone connects, the link
  * is bonded ("Just Works") and encrypted, then the AncsClient takes over.
  *
- * Up to CONFIG_BT_NIMBLE_MAX_CONNECTIONS devices (iPhone / iPad) can be
- * connected at the same time, each with its own AncsClient. Advertising
- * continues while a connection slot is free.
+ * Up to GetMaxConnections() devices (iPhone / iPad) can be connected at the
+ * same time, each with its own AncsClient. Advertising continues while a
+ * connection slot is free. The limit is read from NVS (namespace "ble", key
+ * "max_conn"), falling back to CONFIG_BLE_MAX_CONNECTIONS, and can never
+ * exceed kMaxConnections (CONFIG_BT_NIMBLE_MAX_CONNECTIONS, fixed at build time).
  */
 class BleManager {
 public:
     using ConnectionCallback = std::function<void(bool connected, int connection_count)>;
+    // Number of connection slots compiled into NimBLE / the controller
     static constexpr int kMaxConnections = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;
 
     static BleManager& GetInstance() {
@@ -36,7 +39,13 @@ public:
 
     void Initialize(const std::string& device_name);
 
+    // Advertised name, e.g. "ANCS-A1B2C3". Set by Initialize(), read-only afterwards.
+    const std::string& GetDeviceName() const { return device_name_; }
     int GetConnectionCount() const;
+    int GetMaxConnections() const { return max_connections_; }
+    // Thread-safe, clamped to [1, kMaxConnections], persisted to NVS. Lowering
+    // the limit does not drop connected devices, it only stops advertising.
+    void SetMaxConnections(int max_connections);
     // Both callbacks are invoked from the NimBLE host task. Set them before Initialize().
     void SetConnectionCallback(ConnectionCallback callback) { connection_callback_ = std::move(callback); }
     void SetNotificationCallback(AncsClient::NotificationCallback callback);
@@ -73,6 +82,8 @@ private:
     static void OnAdvertiseRetry(struct ble_npl_event* ev);
 
     std::array<Link, kMaxConnections> links_;
+    std::atomic<int> max_connections_ = kMaxConnections;
+    std::atomic<bool> initialized_ = false;
     ConnectionCallback connection_callback_;
     std::string device_name_;
     uint8_t own_addr_type_ = 0;

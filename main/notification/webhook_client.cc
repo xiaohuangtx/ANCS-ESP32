@@ -1,9 +1,11 @@
 #include "webhook_client.h"
+#include "notification.h"
 #include "settings.h"
 
 #include <esp_log.h>
 #include <esp_http_client.h>
 #include <esp_crt_bundle.h>
+#include <cJSON.h>
 
 #define TAG "WebhookClient"
 
@@ -53,6 +55,16 @@ void WebhookClient::SetAuthToken(const std::string& token) {
     settings.SetString("auth", token);
 }
 
+std::string WebhookClient::GetUrl() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return url_;
+}
+
+std::string WebhookClient::GetAuthToken() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return auth_token_;
+}
+
 void WebhookClient::SetNetworkReady(bool ready) {
     if (event_group_ == nullptr) {
         return;
@@ -73,6 +85,28 @@ void WebhookClient::Post(const std::string& json) {
         ESP_LOGW(TAG, "Queue full, notification dropped");
         delete item;
     }
+}
+
+int WebhookClient::SendTest() {
+    AncsNotification notification;
+    notification.has_attributes = true;
+    notification.app_id = "com.example.ancs-esp32";
+    notification.app_name = "ANCS-ESP32";
+    notification.title = "Webhook test";
+    notification.message = "This is a test notification from the ANCS-ESP32 admin page";
+    notification.message_size = notification.message.size();
+
+    // Same shape as a real notification, but marked so receivers can tell
+    cJSON* root = notification.ToCJson();
+    cJSON_ReplaceItemInObject(root, "event", cJSON_CreateString("test"));
+    char* str = cJSON_PrintUnformatted(root);
+    std::string body(str ? str : "{}");
+    cJSON_free(str);
+    cJSON_Delete(root);
+
+    int status = -1;
+    Send(body, &status);
+    return status;
 }
 
 void WebhookClient::Run() {
@@ -99,7 +133,7 @@ void WebhookClient::Run() {
     }
 }
 
-bool WebhookClient::Send(const std::string& body) {
+bool WebhookClient::Send(const std::string& body, int* status_code) {
     std::string url;
     std::string auth_token;
     {
@@ -136,6 +170,9 @@ bool WebhookClient::Send(const std::string& body) {
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "POST failed: %s", esp_err_to_name(err));
         return false;
+    }
+    if (status_code != nullptr) {
+        *status_code = status;
     }
     if (status < 200 || status >= 300) {
         ESP_LOGW(TAG, "POST returned HTTP %d", status);

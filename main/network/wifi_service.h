@@ -41,6 +41,8 @@ public:
     bool IsConnected() const;
     bool IsInWifiConfigMode() const;
     std::string GetIpAddress() const;
+    std::string GetSsid() const;
+    int GetRssi() const;
 
 private:
     WifiService();

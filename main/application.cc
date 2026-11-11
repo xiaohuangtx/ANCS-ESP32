@@ -2,6 +2,8 @@
 #include "ble_manager.h"
 #include "wifi_service.h"
 #include "webhook_client.h"
+#include "notification_history.h"
+#include "web_server.h"
 
 #include <esp_log.h>
 #include <esp_app_desc.h>
@@ -60,9 +62,14 @@ void Application::Initialize() {
     // Wi-Fi: connect to a stored network, or open the provisioning hotspot
     auto& wifi = WifiService::GetInstance();
     wifi.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
+        // The admin page is started / stopped right here rather than in the main
+        // task: entering config mode emits Disconnected just before the hotspot
+        // starts its own server on port 80, so ours must be gone by then
         if (event == NetworkEvent::Connected) {
+            WebServer::GetInstance().Start();
             xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_CONNECTED);
         } else if (event == NetworkEvent::Disconnected) {
+            WebServer::GetInstance().Stop();
             xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_DISCONNECTED);
         }
     });
@@ -72,7 +79,7 @@ void Application::Initialize() {
     auto& ble = BleManager::GetInstance();
     ble.SetConnectionCallback([](bool connected, int connection_count) {
         ESP_LOGI(TAG, "Device %s, %d/%d connected", connected ? "connected" : "disconnected",
-                 connection_count, BleManager::kMaxConnections);
+                 connection_count, BleManager::GetInstance().GetMaxConnections());
     });
     ble.SetNotificationCallback([this](const AncsNotification& notification) {
         // Called from the NimBLE host task: hand over to the main task
@@ -112,6 +119,7 @@ void Application::InitializeButtons() {
 
 void Application::OnNotification(const AncsNotification& notification) {
     notification.Print();
+    NotificationHistory::GetInstance().Add(notification);
     WebhookClient::GetInstance().Post(notification.ToJson());
 }
 

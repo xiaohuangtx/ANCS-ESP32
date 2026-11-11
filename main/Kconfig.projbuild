@@ -9,6 +9,15 @@ config BLE_DEVICE_NAME_PREFIX
         Name shown in the iPhone Bluetooth settings is "<prefix>-XXXXXX",
         where XXXXXX is the last 3 bytes of the base MAC address.
 
+config BLE_MAX_CONNECTIONS
+    int "Default number of devices connected at the same time"
+    range 1 BT_NIMBLE_MAX_CONNECTIONS
+    default 1
+    help
+        Can be changed on the admin page (stored in NVS, namespace "ble",
+        key "max_conn"), up to Component config > Bluetooth > NimBLE >
+        Maximum number of concurrent connections.
+
 config ANCS_IGNORE_PREEXISTING
     bool "Ignore pre-existing notifications"
     default n
@@ -78,6 +87,27 @@ config WEBHOOK_QUEUE_SIZE
     int "Pending notification queue size"
     range 1 64
     default 16
+
+endmenu
+
+menu "Admin web page"
+
+config NOTIFICATION_HISTORY_SIZE
+    int "Default number of notifications kept"
+    range 1 100
+    default 30
+    help
+        The most recent notifications are kept in RAM and shown on the admin
+        page (http://<device IP>/). Can be changed on the page; the value is
+        stored in NVS (namespace "history", key "size").
+
+config WEB_ADMIN_PASSWORD
+    string "Default admin password"
+    default ""
+    help
+        If set, the admin page asks for HTTP Basic auth (user "admin").
+        Leave empty for no password. Can be changed on the page; the value is
+        stored in NVS (namespace "web", key "password").
 
 endmenu
 
