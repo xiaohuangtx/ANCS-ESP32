@@ -42,6 +42,7 @@ private:
     BleManager() = default;
 
     void StartAdvertising();
+    void ScheduleAdvertising();
     int HandleGapEvent(struct ble_gap_event* event);
     void PrintConnection(uint16_t conn_handle);
 
@@ -50,6 +51,8 @@ private:
     static void OnReset(int reason);
     static void HostTask(void* param);
     static void OnClearBondsEvent(struct ble_npl_event* ev);
+    static void OnAdvertiseEvent(struct ble_npl_event* ev);
+    static void OnAdvertiseRetry(struct ble_npl_event* ev);
 
     AncsClient ancs_client_;
     ConnectionCallback connection_callback_;
@@ -57,6 +60,8 @@ private:
     uint8_t own_addr_type_ = 0;
     std::atomic<uint16_t> conn_handle_ = BLE_HS_CONN_HANDLE_NONE;
     struct ble_npl_event clear_bonds_event_;
+    struct ble_npl_event advertise_event_;
+    struct ble_npl_callout advertise_retry_timer_;
 };
 
 #endif // BLE_MANAGER_H

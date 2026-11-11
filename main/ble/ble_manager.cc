@@ -1,6 +1,7 @@
 #include "ble_manager.h"
 
 #include <esp_log.h>
+#include <algorithm>
 #include <nimble/nimble_port.h>
 #include <nimble/nimble_port_freertos.h>
 #include <host/util/util.h>
@@ -48,6 +49,8 @@ void BleManager::Initialize(const std::string& device_name) {
 
     ancs_client_.Initialize();
     ble_npl_event_init(&clear_bonds_event_, OnClearBondsEvent, this);
+    ble_npl_event_init(&advertise_event_, OnAdvertiseEvent, this);
+    ble_npl_callout_init(&advertise_retry_timer_, nimble_port_get_dflt_eventq(), OnAdvertiseRetry, this);
 
     nimble_port_freertos_init(HostTask);
 }
@@ -90,13 +93,19 @@ void BleManager::StartAdvertising() {
         return;
     }
 
-    // Advertising data: flags + ANCS service solicitation (3 + 18 bytes).
+    // Advertising data: flags + ANCS service solicitation (3 + 18 bytes),
+    // plus as much of the name as fits in the remaining 10 bytes.
     // Soliciting ANCS makes iOS show the device in Settings > Bluetooth and
-    // offer "Share System Notifications".
+    // offer "Share System Notifications". The name is also put here because
+    // iOS may not use the scan response when listing devices.
+    static constexpr size_t kMaxAdvNameLen = 31 - 3 - 18 - 2;
     struct ble_hs_adv_fields fields = {};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.sol_uuids128 = &AncsClient::ServiceUuid();
     fields.sol_num_uuids128 = 1;
+    fields.name = reinterpret_cast<const uint8_t*>(device_name_.c_str());
+    fields.name_len = std::min(device_name_.size(), kMaxAdvNameLen);
+    fields.name_is_complete = device_name_.size() <= kMaxAdvNameLen;
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to set advertising data, rc=%d", rc);
@@ -120,11 +129,38 @@ void BleManager::StartAdvertising() {
     adv_params.itvl_min = BLE_GAP_ADV_ITVL_MS(100);
     adv_params.itvl_max = BLE_GAP_ADV_ITVL_MS(150);
     rc = ble_gap_adv_start(own_addr_type_, nullptr, BLE_HS_FOREVER, &adv_params, GapEventHandler, this);
+    if (rc == BLE_HS_ENOMEM) {
+        // The previous link is still being released. Do not rely on a later
+        // disconnect event to restart advertising: retry until it succeeds.
+        if (conn_handle_ == BLE_HS_CONN_HANDLE_NONE) {
+            ESP_LOGI(TAG, "Connection slot busy, retrying advertising in 500 ms");
+            ble_npl_callout_reset(&advertise_retry_timer_, ble_npl_time_ms_to_ticks32(500));
+        }
+        return;
+    }
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to start advertising, rc=%d", rc);
         return;
     }
     ESP_LOGI(TAG, "Advertising started");
+}
+
+void BleManager::ScheduleAdvertising() {
+    // Run after the current GAP event, once NimBLE has released the connection.
+    // Calling ble_gap_adv_start() directly from a failed connect / disconnect
+    // event fails with BLE_HS_ENOMEM because the connection is not freed yet.
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &advertise_event_);
+}
+
+void BleManager::OnAdvertiseEvent(struct ble_npl_event* ev) {
+    static_cast<BleManager*>(ble_npl_event_get_arg(ev))->StartAdvertising();
+}
+
+void BleManager::OnAdvertiseRetry(struct ble_npl_event* ev) {
+    auto* self = static_cast<BleManager*>(ble_npl_event_get_arg(ev));
+    if (self->conn_handle_ == BLE_HS_CONN_HANDLE_NONE) {
+        self->StartAdvertising();
+    }
 }
 
 void BleManager::PrintConnection(uint16_t conn_handle) {
@@ -151,11 +187,15 @@ int BleManager::HandleGapEvent(struct ble_gap_event* event) {
     switch (event->type) {
         case BLE_GAP_EVENT_CONNECT:
             if (event->connect.status != 0) {
-                ESP_LOGW(TAG, "Connection failed, status=%d", event->connect.status);
-                StartAdvertising();
+                // In the ESP-IDF NimBLE port, a peripheral link that drops before the remote
+                // version/features are read reports the HCI reason here (e.g. 0x13: the iPhone
+                // disconnected), and a DISCONNECT event may follow
+                ESP_LOGW(TAG, "Connection failed, status=0x%x", event->connect.status);
+                ScheduleAdvertising();
                 return 0;
             }
             conn_handle_ = event->connect.conn_handle;
+            ble_npl_callout_stop(&advertise_retry_timer_);
             ESP_LOGI(TAG, "Connected");
             PrintConnection(event->connect.conn_handle);
             if (connection_callback_) {
@@ -178,14 +218,19 @@ int BleManager::HandleGapEvent(struct ble_gap_event* event) {
             if (connection_callback_) {
                 connection_callback_(false);
             }
-            StartAdvertising();
+            ScheduleAdvertising();
             return 0;
 
         case BLE_GAP_EVENT_ADV_COMPLETE:
-            StartAdvertising();
+            ScheduleAdvertising();
             return 0;
 
         case BLE_GAP_EVENT_ENC_CHANGE:
+            if (event->enc_change.status == BLE_HS_ENOTCONN) {
+                // The link dropped before pairing/encryption finished; see the following disconnect reason
+                ESP_LOGW(TAG, "Connection lost before encryption completed");
+                return 0;
+            }
             if (event->enc_change.status != 0) {
                 ESP_LOGE(TAG, "Encryption failed, status=0x%x", event->enc_change.status);
                 if (event->enc_change.status == BLE_HS_HCI_ERR(BLE_ERR_PINKEY_MISSING) ||
