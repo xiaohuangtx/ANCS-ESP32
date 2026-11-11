@@ -29,6 +29,11 @@ static std::string GetDeviceId() {
     return buf;
 }
 
+bool AncsNotification::IsMessageTruncated() const {
+    // A cut may land up to 3 bytes early to keep a UTF-8 character whole
+    return (size_t)message_size > message.size() || message.size() + 3 >= CONFIG_ANCS_MAX_MESSAGE_LEN;
+}
+
 void AncsNotification::Print() const {
     printf("\n==================== ANCS Notification ====================\n");
     printf("Device   : %s (%s)\n", peer_name.c_str(), peer_address.c_str());
@@ -47,8 +52,8 @@ void AncsNotification::Print() const {
             printf("Subtitle : %s\n", subtitle.c_str());
         }
         printf("Message  : %s\n", message.c_str());
-        if ((size_t)message_size > message.size()) {
-            printf("           (truncated, full size %d bytes)\n", message_size);
+        if (IsMessageTruncated()) {
+            printf("           (truncated, full size %d)\n", message_size);
         }
         if (!positive_action.empty() || !negative_action.empty()) {
             printf("Actions  : [%s] / [%s]\n", positive_action.c_str(), negative_action.c_str());
@@ -93,6 +98,7 @@ cJSON* AncsNotification::ToCJson() const {
         cJSON_AddStringToObject(root, "subtitle", subtitle.c_str());
         cJSON_AddStringToObject(root, "message", message.c_str());
         cJSON_AddNumberToObject(root, "message_size", message_size);
+        cJSON_AddBoolToObject(root, "message_truncated", IsMessageTruncated());
         cJSON_AddStringToObject(root, "date", date.c_str());
         cJSON_AddStringToObject(root, "positive_action", positive_action.c_str());
         cJSON_AddStringToObject(root, "negative_action", negative_action.c_str());

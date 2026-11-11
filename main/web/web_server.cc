@@ -322,6 +322,7 @@ esp_err_t WebServer::HandleGetNotifications(httpd_req_t* req) {
     auto& history = NotificationHistory::GetInstance();
     cJSON* json = cJSON_CreateObject();
     cJSON_AddNumberToObject(json, "capacity", history.GetCapacity());
+    cJSON_AddNumberToObject(json, "max_message_len", CONFIG_ANCS_MAX_MESSAGE_LEN);
     cJSON_AddItemToObject(json, "items", history.ToCJson());
     return SendJson(req, json);
 }

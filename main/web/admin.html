@@ -37,13 +37,27 @@ button:disabled { opacity:.5; cursor:not-allowed; }
 .badge { display:inline-block; padding:0 8px; border-radius:10px; font-size:12px; background:#eef3ff; color:var(--primary); }
 .badge.gray { background:#f0f1f5; color:var(--muted); }
 .badge.red { background:#fff0f0; color:var(--danger); }
-.notif { border-top:1px solid var(--line); padding:12px 0; }
+.notif { border-top:1px solid var(--line); padding:12px 8px; margin:0 -8px; cursor:pointer; border-radius:6px; }
 .notif:first-of-type { border-top:none; }
+.notif:hover { background:#f7f8fa; }
 .notif .head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 .notif .app { font-weight:600; }
 .notif .time { color:var(--muted); font-size:12px; margin-left:auto; }
-.notif .title { margin-top:4px; font-weight:500; }
-.notif .body { margin-top:2px; white-space:pre-wrap; word-break:break-word; }
+.notif .title { margin-top:4px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.notif .body { margin-top:2px; white-space:pre-wrap; word-break:break-word; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; }
+.notif .more { color:var(--primary); }
+.modal { position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:center; justify-content:center; padding:16px; z-index:10; }
+.modal.open { display:flex; }
+.modal .box { background:#fff; border-radius:10px; width:100%; max-width:560px; max-height:90vh; display:flex; flex-direction:column; }
+.modal .top { display:flex; align-items:center; gap:8px; padding:14px 20px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+.modal .top .app { font-weight:600; font-size:16px; }
+.modal .top .close { margin-left:auto; border:none; font-size:22px; line-height:1; padding:0 4px; background:none; color:var(--muted); }
+.modal .content { padding:16px 20px; overflow:auto; }
+.modal .content .title { font-size:16px; font-weight:600; word-break:break-word; }
+.modal .content .subtitle { color:var(--muted); margin-top:2px; word-break:break-word; }
+.modal .content .body { margin-top:10px; white-space:pre-wrap; word-break:break-word; user-select:text; }
+.modal .warn { margin-top:10px; padding:8px 10px; background:#fff7e8; color:#b26a00; border-radius:6px; font-size:12px; }
+.modal .grid { margin-top:16px; padding-top:12px; border-top:1px solid var(--line); }
 .notif .meta { margin-top:4px; color:var(--muted); font-size:12px; }
 .empty { color:var(--muted); text-align:center; padding:32px 0; }
 .progress { height:8px; background:#eef0f4; border-radius:4px; overflow:hidden; margin-top:12px; display:none; }
@@ -164,6 +178,10 @@ button:disabled { opacity:.5; cursor:not-allowed; }
 </section>
 
 </main>
+<div class="modal" id="nmodal"><div class="box">
+  <div class="top"><span class="app" id="mapp"></span><span id="mbadges"></span><button class="close" id="mclose" title="关闭">×</button></div>
+  <div class="content" id="mcontent"></div>
+</div></div>
 <script>
 const $ = id => document.getElementById(id);
 const CATEGORY = { Other:'其他', IncomingCall:'来电', MissedCall:'未接来电', Voicemail:'语音留言', Social:'社交', Schedule:'日程',
@@ -231,22 +249,54 @@ async function loadNotifications() {
   try { data = await api('/api/notifications'); } catch (e) { $('nlist').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   $('ncount').textContent = data.items.length + ' / ' + data.capacity;
   if (!data.items.length) { $('nlist').innerHTML = '<div class="empty">暂无通知</div>'; return; }
-  $('nlist').innerHTML = data.items.map(n => {
-    const app = n.app_name || n.app_id || '未知应用';
-    const badges = [`<span class="badge">${esc(CATEGORY[n.category] || n.category)}</span>`];
-    if (n.event === 'modified') badges.push('<span class="badge gray">已更新</span>');
-    if (n.flags.important) badges.push('<span class="badge red">重要</span>');
-    if (n.flags.pre_existing) badges.push('<span class="badge gray">历史</span>');
+  notifications = data.items; maxMessageLen = data.max_message_len;
+  $('nlist').innerHTML = data.items.map((n, i) => {
     const date = n.date ? n.date.replace('T', ' ').slice(5, 16) : '';
     const title = [n.title, n.subtitle].filter(Boolean).join(' · ');
-    return `<div class="notif">
-      <div class="head"><span class="app">${esc(app)}</span>${badges.join('')}<span class="time" title="${esc(n.date)}">${esc(date)} · ${ago(n.received_ago)}</span></div>
+    return `<div class="notif" data-index="${i}">
+      <div class="head"><span class="app">${esc(appName(n))}</span>${badges(n)}<span class="time" title="${esc(n.date)}">${esc(date)} · ${ago(n.received_ago)}</span></div>
       ${title ? `<div class="title">${esc(title)}</div>` : ''}
       ${n.message ? `<div class="body">${esc(n.message)}</div>` : ''}
-      <div class="meta">来自 ${esc(n.peer_name || n.peer_address)}${n.message_size > (n.message || '').length ? ' · 内容已截断' : ''}</div>
+      <div class="meta">来自 ${esc(n.peer_name || n.peer_address)}${n.message_truncated ? ' · 内容已被 iOS 截断' : ''}<span class="more"></span></div>
     </div>`;
   }).join('');
+  // Offer "全文" only where the preview is clipped (title on one line, body on 3 lines)
+  $('nlist').querySelectorAll('.notif').forEach(el => {
+    const clipped = [...el.querySelectorAll('.title, .body')].some(e => e.scrollHeight > e.clientHeight + 1 || e.scrollWidth > e.clientWidth + 1);
+    if (clipped) el.querySelector('.more').textContent = ' · 点击查看全文';
+    el.onclick = () => { if (!getSelection().toString()) openNotification(notifications[el.dataset.index]); };
+  });
 }
+let notifications = [], maxMessageLen = 0;
+function appName(n) { return n.app_name || n.app_id || '未知应用'; }
+function badges(n) {
+  const b = [`<span class="badge">${esc(CATEGORY[n.category] || n.category)}</span>`];
+  if (n.event === 'modified') b.push('<span class="badge gray">已更新</span>');
+  if (n.flags.important) b.push('<span class="badge red">重要</span>');
+  if (n.flags.pre_existing) b.push('<span class="badge gray">历史</span>');
+  return b.join(' ');
+}
+function openNotification(n) {
+  $('mapp').textContent = appName(n);
+  $('mbadges').innerHTML = badges(n);
+  const actions = [n.positive_action, n.negative_action].filter(Boolean).join(' / ');
+  const flags = [n.flags.silent && '静默', n.flags.important && '重要', n.flags.pre_existing && '连接前已存在'].filter(Boolean).join('、');
+  $('mcontent').innerHTML = `
+    ${n.title ? `<div class="title">${esc(n.title)}</div>` : ''}
+    ${n.subtitle ? `<div class="subtitle">${esc(n.subtitle)}</div>` : ''}
+    <div class="body">${n.message ? esc(n.message) : '<span style="color:var(--muted)">（无内容）</span>'}</div>
+    ${n.message_truncated ? `<div class="warn">内容已被 iOS 截断：设备每条通知最多获取 ${maxMessageLen} 字节（原始长度 ${n.message_size}），超出部分没有发送到设备，无法显示。</div>` : ''}
+    <div class="grid">${kv([['时间', n.date ? n.date.replace('T', ' ') : '-'], ['收到', ago(n.received_ago)],
+      ['来自设备', (n.peer_name || '-') + (n.peer_address ? ' (' + n.peer_address + ')' : '')], ['App ID', n.app_id || '-'],
+      ['分类', (CATEGORY[n.category] || n.category) + (n.category_count > 1 ? `（共 ${n.category_count} 条）` : '')],
+      ['操作按钮', actions || '-'], ['标记', flags || '-'], ['UID', n.uid]])}</div>`;
+  $('mcontent').scrollTop = 0;
+  $('nmodal').classList.add('open');
+}
+function closeNotification() { $('nmodal').classList.remove('open'); }
+$('mclose').onclick = closeNotification;
+$('nmodal').onclick = e => { if (e.target === $('nmodal')) closeNotification(); };
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeNotification(); });
 $('nrefresh').onclick = loadNotifications;
 $('nclear').onclick = async () => {
   if (!confirm('确定清空所有通知记录？')) return;

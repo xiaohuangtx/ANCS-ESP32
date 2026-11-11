@@ -33,6 +33,11 @@ struct AncsNotification {
     std::string positive_action;
     std::string negative_action;
 
+    // iOS cuts the message at CONFIG_ANCS_MAX_MESSAGE_LEN bytes. The spec does
+    // not say whether message_size counts bytes or characters, so also treat a
+    // message that (nearly) fills the requested length as truncated.
+    bool IsMessageTruncated() const;
+
     // Print a human readable block to the console
     void Print() const;
     // Serialize to the JSON body used by the webhook

@@ -86,7 +86,7 @@ Actions  : [] / [清除]
 设备连上 Wi-Fi 后，串口会打印 `Admin page: http://192.168.x.x/`，用同一局域网内的电脑或手机浏览器打开即可：
 
 - **概览**：蓝牙名称（`ANCS-XXXXXX`，页面标题也会显示，方便区分多块板子）、固件版本、IP、Wi-Fi 信号、蓝牙连接数、内存
-- **通知记录**：最近收到的通知（默认 30 条，可在「设置」中改为 1–100 条），每 5 秒自动刷新。同一条通知的 `modified` 事件会覆盖之前的记录。记录只保存在内存中，重启后清空
+- **通知记录**：列表中正文最多显示 3 行，点击任意一条弹出完整内容和详情（App ID、来源设备、操作按钮等）。最近收到的通知（默认 30 条，可在「设置」中改为 1–100 条），每 5 秒自动刷新。同一条通知的 `modified` 事件会覆盖之前的记录。记录只保存在内存中，重启后清空
 - **设置**：Webhook URL / Authorization（保存后立即生效，可发送测试通知）、蓝牙同时连接数量、通知保存条数、管理密码
 - **Wi-Fi**：查看、添加、编辑（改名称 / 密码）、删除已保存的 Wi-Fi（最多 10 个，存于 NVS namespace `wifi`，与配网热点页面共用）。密码不会回显。设备总是连接信号最强的已保存 Wi-Fi，所以没有优先级设置；修改不影响当前连接，在下次重新扫描连接或重启后生效
 - **固件升级**：选择 `build/ancs-esp32.bin` 上传。设备会检查芯片型号和项目名，写入另一个 OTA 分区后自动重启；新固件连上 Wi-Fi、管理后台启动后才会被确认，如果新固件在此之前崩溃重启，bootloader 会自动回滚到旧版本
@@ -140,6 +140,7 @@ URL 为空时 Webhook 关闭。配置来源（优先级从高到低）：
   "subtitle": "",
   "message": "晚上一起吃饭吗？",
   "message_size": 24,
+  "message_truncated": false,
   "date": "2026-11-11T09:30:00",
   "positive_action": "",
   "negative_action": "清除"
@@ -147,7 +148,8 @@ URL 为空时 Webhook 关闭。配置来源（优先级从高到低）：
 ```
 
 `device` 是 ESP32 的 MAC；`peer_name` / `peer_address` 标识通知来自哪台 iPhone / iPad（地址为绑定后的身份地址，重连不变）。
-`event` 取值为 `added` / `modified`；管理后台发送的测试通知为 `test`。返回 2xx 视为成功；网络错误或 5xx 最多重试 3 次；4xx 不重试。
+`event` 取值为 `added` / `modified`；管理后台发送的测试通知为 `test`。
+`message` 最多 `CONFIG_ANCS_MAX_MESSAGE_LEN`（默认 512）字节，更长的内容 iOS 不会发送，此时 `message_truncated` 为 `true`、`message_size` 为原始长度。返回 2xx 视为成功；网络错误或 5xx 最多重试 3 次；4xx 不重试。
 
 ## 扩展
 
