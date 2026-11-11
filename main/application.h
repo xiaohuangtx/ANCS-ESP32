@@ -4,6 +4,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <freertos/task.h>
+#include <esp_timer.h>
 
 #include <mutex>
 #include <deque>
@@ -17,6 +18,7 @@
 #define MAIN_EVENT_SCHEDULE             (1 << 0)
 #define MAIN_EVENT_NETWORK_CONNECTED    (1 << 1)
 #define MAIN_EVENT_NETWORK_DISCONNECTED (1 << 2)
+#define MAIN_EVENT_CLOCK_TICK           (1 << 3)
 
 class Application {
 public:
@@ -51,10 +53,12 @@ private:
 
     void InitializeButtons();
     void OnNotification(const AncsNotification& notification);
+    void PrintHeapStats();
 
     std::mutex mutex_;
     std::deque<std::function<void()>> main_tasks_;
     EventGroupHandle_t event_group_ = nullptr;
+    esp_timer_handle_t clock_timer_handle_ = nullptr;
     std::unique_ptr<Button> boot_button_;
 };
 
