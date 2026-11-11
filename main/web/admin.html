@@ -51,6 +51,12 @@ button:disabled { opacity:.5; cursor:not-allowed; }
 .file { border:1px dashed var(--line); border-radius:8px; padding:20px; text-align:center; cursor:pointer; color:var(--muted); }
 .file:hover { border-color:var(--primary); }
 .file input { display:none; }
+.wifi { display:flex; align-items:center; gap:8px; flex-wrap:wrap; border-top:1px solid var(--line); padding:10px 0; }
+.wifi:first-of-type { border-top:none; }
+.wifi .name { font-weight:600; word-break:break-all; }
+.wifi .ops { margin-left:auto; display:flex; gap:8px; }
+.wifi .ops button { padding:4px 12px; font-size:13px; }
+.check { display:flex; align-items:center; gap:6px; margin-top:8px; color:var(--muted); font-size:13px; }
 </style>
 </head>
 <body>
@@ -59,6 +65,7 @@ button:disabled { opacity:.5; cursor:not-allowed; }
   <a data-tab="overview" class="active">概览</a>
   <a data-tab="notifications">通知记录</a>
   <a data-tab="settings">设置</a>
+  <a data-tab="wifi">Wi-Fi</a>
   <a data-tab="ota">固件升级</a>
   <a data-tab="system">系统</a>
 </nav>
@@ -108,6 +115,24 @@ button:disabled { opacity:.5; cursor:not-allowed; }
     <label>新密码</label><input type="password" id="pw1" autocomplete="new-password">
     <label>确认新密码</label><input type="password" id="pw2" autocomplete="new-password">
     <div class="actions"><button class="primary" id="pwsave">设置密码</button><button class="danger" id="pwclear">取消密码</button><span class="msg" id="pwmsg"></span></div>
+  </div>
+</section>
+
+<section id="wifi">
+  <div class="card">
+    <h2>已保存的 Wi-Fi <span class="badge gray" id="wcount"></span><span class="spacer"></span><button id="wrefresh">刷新</button></h2>
+    <div id="wlist"><div class="empty">加载中…</div></div>
+    <div class="hint">设备会自动连接信号最强的已保存 Wi-Fi。修改不影响当前连接，在下次重新扫描连接或重启后生效（短暂断线时会先重试当前网络）。</div>
+  </div>
+  <div class="card">
+    <h2 id="wformtitle">添加 Wi-Fi</h2>
+    <label>Wi-Fi 名称（SSID）</label>
+    <input type="text" id="wssid" maxlength="32" autocomplete="off">
+    <label>密码</label>
+    <input type="password" id="wpass" maxlength="64" autocomplete="new-password">
+    <div class="hint" id="wpasshint">开放网络留空。</div>
+    <label class="check"><input type="checkbox" id="wshow"> 显示密码</label>
+    <div class="actions"><button class="primary" id="wsave">添加</button><button id="wcancel" style="display:none">取消</button><span class="msg" id="wmsg"></span></div>
   </div>
 </section>
 
@@ -179,6 +204,7 @@ function switchTab(name) {
   clearInterval(timer);
   const refresh = { overview: loadStatus, notifications: loadNotifications, ota: loadStatus }[name];
   if (name === 'settings') loadConfig();
+  if (name === 'wifi') loadWifi();
   if (refresh) { refresh(); timer = setInterval(refresh, name === 'notifications' ? 5000 : 10000); }
 }
 document.querySelectorAll('nav a').forEach(a => a.onclick = () => switchTab(a.dataset.tab));
@@ -282,6 +308,78 @@ $('pwsave').onclick = () => {
   setPassword(p1);
 };
 $('pwclear').onclick = () => { if (confirm('取消密码后任何人都能访问本页面，确定？')) setPassword(''); };
+
+let wifiList = [], wifiConnected = '', wifiEditing = null;
+async function loadWifi() {
+  let data;
+  try { data = await api('/api/wifi'); } catch (e) { $('wlist').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  wifiList = data.items; wifiConnected = data.connected;
+  $('wcount').textContent = data.items.length + ' / ' + data.max;
+  if (!data.items.length) { $('wlist').innerHTML = '<div class="empty">没有已保存的 Wi-Fi</div>'; return; }
+  $('wlist').innerHTML = data.items.map((w, i) => {
+    const badges = [];
+    if (w.ssid === data.connected) badges.push('<span class="badge">当前连接</span>');
+    if (!w.has_password) badges.push('<span class="badge gray">开放网络</span>');
+    if (w.channel) badges.push(`<span class="badge gray">信道 ${w.channel}</span>`);
+    return `<div class="wifi"><span class="name">${esc(w.ssid)}</span>${badges.join('')}
+      <span class="ops"><button data-edit="${i}">编辑</button><button class="danger" data-del="${i}">删除</button></span></div>`;
+  }).join('');
+  $('wlist').querySelectorAll('[data-edit]').forEach(b => b.onclick = () => editWifi(wifiList[b.dataset.edit]));
+  $('wlist').querySelectorAll('[data-del]').forEach(b => b.onclick = () => removeWifi(wifiList[b.dataset.del]));
+}
+function resetWifiForm() {
+  wifiEditing = null;
+  $('wformtitle').textContent = '添加 Wi-Fi';
+  $('wssid').value = $('wpass').value = '';
+  $('wpass').placeholder = '';
+  $('wpasshint').textContent = '开放网络留空。';
+  $('wsave').textContent = '添加';
+  $('wcancel').style.display = 'none';
+}
+function editWifi(w) {
+  wifiEditing = w.ssid;
+  $('wformtitle').textContent = '编辑 ' + w.ssid;
+  $('wssid').value = w.ssid;
+  $('wpass').value = '';
+  $('wpass').placeholder = '留空则不修改';
+  $('wpasshint').textContent = '留空则保留原密码。要改为开放网络，请删除后重新添加。';
+  $('wsave').textContent = '保存';
+  $('wcancel').style.display = '';
+  $('wmsg').textContent = '';
+  $('wssid').focus();
+}
+async function removeWifi(w) {
+  let warn = `确定删除 ${w.ssid}？`;
+  if (w.ssid === wifiConnected) warn += '\n这是当前连接的 Wi-Fi，删除后当前连接不受影响，重启后不会再连接。';
+  if (wifiList.length === 1) warn += '\n这是最后一个 Wi-Fi，删除后设备重启会进入配网模式。';
+  if (!confirm(warn)) return;
+  try {
+    await api('/api/wifi', { method:'DELETE', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ ssid: w.ssid }) });
+    if (wifiEditing === w.ssid) resetWifiForm();
+    show('wmsg', '已删除 ' + w.ssid, true);
+  } catch (e) { show('wmsg', e.message); }
+  loadWifi();
+}
+$('wsave').onclick = async () => {
+  const ssid = $('wssid').value, pass = $('wpass').value;
+  if (!ssid) return show('wmsg', '请输入 Wi-Fi 名称');
+  try {
+    if (wifiEditing === null) {
+      await postJson('/api/wifi', { ssid, password: pass });
+      show('wmsg', '已添加 ' + ssid, true);
+    } else {
+      const body = { ssid: wifiEditing, new_ssid: ssid };
+      if (pass) body.password = pass;
+      await api('/api/wifi', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      show('wmsg', '已保存 ' + ssid, true);
+    }
+    resetWifiForm();
+  } catch (e) { show('wmsg', e.message); }
+  loadWifi();
+};
+$('wcancel').onclick = () => { resetWifiForm(); $('wmsg').textContent = ''; };
+$('wshow').onchange = () => { $('wpass').type = $('wshow').checked ? 'text' : 'password'; };
+$('wrefresh').onclick = loadWifi;
 
 let fwFile = null;
 $('fw').onchange = () => {

@@ -4,6 +4,7 @@
 #include <esp_timer.h>
 
 #include <string>
+#include <vector>
 #include <functional>
 
 enum class NetworkEvent {
@@ -16,6 +17,13 @@ enum class NetworkEvent {
 };
 
 using NetworkEventCallback = std::function<void(NetworkEvent event, const std::string& data)>;
+
+// A saved Wi-Fi network (NVS namespace "wifi")
+struct SavedNetwork {
+    std::string ssid;
+    bool has_password = false;
+    uint8_t channel = 0;  // 0 = unknown
+};
 
 /**
  * Station connection + hotspot provisioning.
@@ -43,6 +51,17 @@ public:
     std::string GetIpAddress() const;
     std::string GetSsid() const;
     int GetRssi() const;
+
+    // Saved networks. The station picks the strongest one found by a scan, so
+    // the order does not matter. Changes apply on the next (re)connect; the
+    // current connection is kept. The setters return an error message, or ""
+    // on success.
+    static constexpr int kMaxSavedNetworks = 10;
+    std::vector<SavedNetwork> GetSavedNetworks() const;
+    std::string AddNetwork(const std::string& ssid, const std::string& password);
+    // password == nullptr keeps the current one
+    std::string UpdateNetwork(const std::string& ssid, const std::string& new_ssid, const std::string* password);
+    std::string RemoveNetwork(const std::string& ssid);
 
 private:
     WifiService();

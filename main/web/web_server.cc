@@ -74,6 +74,17 @@ static esp_err_t SendError(httpd_req_t* req, const char* status, const std::stri
     return SendJson(req, json);
 }
 
+// "" means success
+static esp_err_t SendResult(httpd_req_t* req, const std::string& error) {
+    return error.empty() ? SendOk(req) : SendError(req, "400 Bad Request", error);
+}
+
+// nullptr if missing or not a string
+static const char* GetJsonString(cJSON* json, const char* key) {
+    cJSON* item = cJSON_GetObjectItem(json, key);
+    return cJSON_IsString(item) ? item->valuestring : nullptr;
+}
+
 // httpd_req_recv() may return less than asked for
 static bool RecvExact(httpd_req_t* req, char* buffer, size_t length) {
     size_t offset = 0;
@@ -153,7 +164,7 @@ void WebServer::Start() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     // Large enough for the webhook test, which runs a TLS handshake in this task
     config.stack_size = 8192;
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 20;
     // Leave sockets for the webhook client (CONFIG_LWIP_MAX_SOCKETS is 10)
     config.max_open_sockets = 4;
     config.lru_purge_enable = true;
@@ -179,6 +190,10 @@ void WebServer::Start() {
         {"/api/reboot", HTTP_POST, HandleReboot, this},
         {"/api/ble/clear-bonds", HTTP_POST, HandleClearBonds, this},
         {"/api/wifi/config-mode", HTTP_POST, HandleWifiConfigMode, this},
+        {"/api/wifi", HTTP_GET, HandleGetWifi, this},
+        {"/api/wifi", HTTP_POST, HandleAddWifi, this},
+        {"/api/wifi", HTTP_PUT, HandleUpdateWifi, this},
+        {"/api/wifi", HTTP_DELETE, HandleRemoveWifi, this},
     };
     for (auto& uri : uris) {
         httpd_register_uri_handler(server_, &uri);
@@ -449,6 +464,79 @@ esp_err_t WebServer::HandleWifiConfigMode(httpd_req_t* req) {
         });
     }, 500);
     return SendOk(req);
+}
+
+// Passwords are never sent back, only whether one is set
+esp_err_t WebServer::HandleGetWifi(httpd_req_t* req) {
+    if (!Self(req)->CheckAuth(req)) {
+        return ESP_OK;
+    }
+    auto& wifi = WifiService::GetInstance();
+    cJSON* json = cJSON_CreateObject();
+    cJSON_AddStringToObject(json, "connected", wifi.IsConnected() ? wifi.GetSsid().c_str() : "");
+    cJSON_AddNumberToObject(json, "max", WifiService::kMaxSavedNetworks);
+    cJSON* items = cJSON_AddArrayToObject(json, "items");
+    for (auto& network : wifi.GetSavedNetworks()) {
+        cJSON* item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "ssid", network.ssid.c_str());
+        cJSON_AddBoolToObject(item, "has_password", network.has_password);
+        cJSON_AddNumberToObject(item, "channel", network.channel);
+        cJSON_AddItemToArray(items, item);
+    }
+    return SendJson(req, json);
+}
+
+// {"ssid", "password"}; an empty or missing password means an open network
+esp_err_t WebServer::HandleAddWifi(httpd_req_t* req) {
+    if (!Self(req)->CheckAuth(req)) {
+        return ESP_OK;
+    }
+    cJSON* json = ReadJsonBody(req);
+    const char* ssid = json ? GetJsonString(json, "ssid") : nullptr;
+    if (ssid == nullptr) {
+        cJSON_Delete(json);
+        return SendError(req, "400 Bad Request", "请求格式错误");
+    }
+    const char* password = GetJsonString(json, "password");
+    auto error = WifiService::GetInstance().AddNetwork(ssid, password ? password : "");
+    cJSON_Delete(json);
+    return SendResult(req, error);
+}
+
+// {"ssid", "new_ssid", "password"}; a missing new_ssid / password keeps the current one
+esp_err_t WebServer::HandleUpdateWifi(httpd_req_t* req) {
+    if (!Self(req)->CheckAuth(req)) {
+        return ESP_OK;
+    }
+    cJSON* json = ReadJsonBody(req);
+    const char* ssid = json ? GetJsonString(json, "ssid") : nullptr;
+    if (ssid == nullptr) {
+        cJSON_Delete(json);
+        return SendError(req, "400 Bad Request", "请求格式错误");
+    }
+    const char* new_ssid = GetJsonString(json, "new_ssid");
+    const char* password = GetJsonString(json, "password");
+    std::string password_str = password ? password : "";
+    auto error = WifiService::GetInstance().UpdateNetwork(ssid, new_ssid ? new_ssid : ssid,
+                                                          password ? &password_str : nullptr);
+    cJSON_Delete(json);
+    return SendResult(req, error);
+}
+
+// {"ssid"}
+esp_err_t WebServer::HandleRemoveWifi(httpd_req_t* req) {
+    if (!Self(req)->CheckAuth(req)) {
+        return ESP_OK;
+    }
+    cJSON* json = ReadJsonBody(req);
+    const char* ssid = json ? GetJsonString(json, "ssid") : nullptr;
+    if (ssid == nullptr) {
+        cJSON_Delete(json);
+        return SendError(req, "400 Bad Request", "请求格式错误");
+    }
+    auto error = WifiService::GetInstance().RemoveNetwork(ssid);
+    cJSON_Delete(json);
+    return SendResult(req, error);
 }
 
 // The request body is the raw application image (build/ancs-esp32.bin)

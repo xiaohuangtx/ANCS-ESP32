@@ -9,7 +9,7 @@
 /**
  * Admin web page on port 80, served while the station is connected:
  * device status, notification history, webhook / history settings,
- * firmware upload (OTA), reboot.
+ * saved Wi-Fi networks, firmware upload (OTA), reboot.
  *
  * If an admin password is set (NVS namespace "web", key "password", falling
  * back to CONFIG_WEB_ADMIN_PASSWORD), every request needs HTTP Basic auth
@@ -50,6 +50,10 @@ private:
     static esp_err_t HandleReboot(httpd_req_t* req);
     static esp_err_t HandleClearBonds(httpd_req_t* req);
     static esp_err_t HandleWifiConfigMode(httpd_req_t* req);
+    static esp_err_t HandleGetWifi(httpd_req_t* req);
+    static esp_err_t HandleAddWifi(httpd_req_t* req);
+    static esp_err_t HandleUpdateWifi(httpd_req_t* req);
+    static esp_err_t HandleRemoveWifi(httpd_req_t* req);
 
     std::mutex server_mutex_;   // Guards server_ (Start / Stop)
     httpd_handle_t server_ = nullptr;
