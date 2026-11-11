@@ -46,7 +46,7 @@ void WifiService::Start(const std::string& ap_ssid) {
     wifi_manager.Initialize(config);
 
     // Forward WiFi events to NetworkEvent with SSID data
-    wifi_manager.SetEventCallback([this, &wifi_manager](WifiEvent event) {
+    wifi_manager.SetEventCallback([this, &wifi_manager](WifiEvent event, const std::string&) {
         std::string ssid = wifi_manager.GetSsid();
         switch (event) {
             case WifiEvent::Scanning:
