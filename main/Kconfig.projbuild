@@ -1,0 +1,91 @@
+menu "ANCS-ESP32 Configuration"
+
+menu "Bluetooth (ANCS)"
+
+config BLE_DEVICE_NAME
+    string "BLE device name"
+    default "ANCS-ESP32"
+    help
+        Name shown in the iPhone Bluetooth settings.
+
+config ANCS_IGNORE_PREEXISTING
+    bool "Ignore pre-existing notifications"
+    default n
+    help
+        After subscribing, iOS replays every notification that is already in
+        Notification Center (flagged as "PreExisting"). Enable this to only
+        report notifications that arrive after the connection is established.
+
+config ANCS_FETCH_APP_NAME
+    bool "Fetch app display name"
+    default y
+    help
+        Query the display name (e.g. "WeChat") for each app identifier
+        (e.g. "com.tencent.xin"). Results are cached in RAM.
+
+config ANCS_MAX_TITLE_LEN
+    int "Max title length (bytes)"
+    range 16 512
+    default 128
+
+config ANCS_MAX_SUBTITLE_LEN
+    int "Max subtitle length (bytes)"
+    range 16 512
+    default 128
+
+config ANCS_MAX_MESSAGE_LEN
+    int "Max message length (bytes)"
+    range 32 1024
+    default 512
+
+endmenu
+
+menu "Wi-Fi"
+
+config WIFI_AP_SSID_PREFIX
+    string "Provisioning hotspot SSID prefix"
+    default "ANCS"
+    help
+        When no Wi-Fi is configured, the device opens a hotspot named
+        "<prefix>-XXXX". Connect to it and open the web page to configure Wi-Fi.
+
+endmenu
+
+menu "Webhook"
+
+config WEBHOOK_URL
+    string "Default webhook URL"
+    default ""
+    help
+        Notifications are POSTed as JSON to this URL. Leave empty to disable.
+        A value stored in NVS (namespace "webhook", key "url") takes precedence.
+
+config WEBHOOK_AUTH_TOKEN
+    string "Default Authorization header"
+    default ""
+    help
+        Optional value of the HTTP "Authorization" header, e.g. "Bearer xxx".
+        A value stored in NVS (namespace "webhook", key "auth") takes precedence.
+
+config WEBHOOK_TIMEOUT_MS
+    int "HTTP timeout (ms)"
+    range 1000 60000
+    default 5000
+
+config WEBHOOK_QUEUE_SIZE
+    int "Pending notification queue size"
+    range 1 64
+    default 16
+
+endmenu
+
+config BOOT_BUTTON_GPIO
+    int "Boot button GPIO (-1 to disable)"
+    range -1 48
+    default 9 if IDF_TARGET_ESP32C3 || IDF_TARGET_ESP32C6
+    default 0
+    help
+        Long press: enter Wi-Fi provisioning mode.
+        Triple click: erase all BLE bonds.
+
+endmenu

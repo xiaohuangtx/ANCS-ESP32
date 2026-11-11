@@ -1,0 +1,15 @@
+tmp/
+managed_components/
+build/
+dist/
+.vscode/
+.devcontainer/
+sdkconfig.old
+sdkconfig
+dependencies.lock
+.env
+.DS_Store
+.cache
+*.pyc
+*.bin
+.clangd
