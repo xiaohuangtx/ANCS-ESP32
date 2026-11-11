@@ -3,6 +3,9 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_log.h>
+#include <esp_wifi.h>
+#include <algorithm>
+#include <cstring>
 #include <utility>
 
 #include <wifi_manager.h>
@@ -32,7 +35,8 @@ WifiService::~WifiService() {
     }
 }
 
-void WifiService::Start() {
+void WifiService::Start(const std::string& ap_ssid) {
+    ap_ssid_ = ap_ssid;
     auto& wifi_manager = WifiManager::GetInstance();
 
     // Initialize WiFi manager
@@ -58,8 +62,9 @@ void WifiService::Start() {
                 OnNetworkEvent(NetworkEvent::Disconnected);
                 break;
             case WifiEvent::ConfigModeEnter:
+                ApplyApSsid();
                 OnNetworkEvent(NetworkEvent::WifiConfigModeEnter,
-                               wifi_manager.GetApSsid() + " " + wifi_manager.GetApWebUrl());
+                               ap_ssid_ + " " + wifi_manager.GetApWebUrl());
                 break;
             case WifiEvent::ConfigModeExit:
                 OnNetworkEvent(NetworkEvent::WifiConfigModeExit);
@@ -132,6 +137,21 @@ void WifiService::OnWifiConnectTimeout(void* arg) {
 
 void WifiService::StartWifiConfigMode() {
     WifiManager::GetInstance().StartConfigAp();
+}
+
+// The Wi-Fi component always names the hotspot "<prefix>-XXXX" (last 2 bytes of
+// the softAP MAC), so rename it right after the AP has been started
+void WifiService::ApplyApSsid() {
+    wifi_config_t wifi_config = {};
+    esp_wifi_get_config(WIFI_IF_AP, &wifi_config);
+    size_t len = std::min(ap_ssid_.size(), sizeof(wifi_config.ap.ssid));
+    memset(wifi_config.ap.ssid, 0, sizeof(wifi_config.ap.ssid));
+    memcpy(wifi_config.ap.ssid, ap_ssid_.data(), len);
+    wifi_config.ap.ssid_len = len;
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &wifi_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set hotspot SSID, err=%s", esp_err_to_name(err));
+    }
 }
 
 void WifiService::EnterWifiConfigMode() {

@@ -21,7 +21,7 @@ using NetworkEventCallback = std::function<void(NetworkEvent event, const std::s
  * Station connection + hotspot provisioning.
  *
  * If no SSID is stored, or connecting times out, the device opens a hotspot
- * "<prefix>-XXXX". Connect to it and open http://192.168.4.1 to configure.
+ * "<prefix>-XXXXXX". Connect to it and open http://192.168.4.1 to configure.
  */
 class WifiService {
 public:
@@ -32,7 +32,8 @@ public:
     WifiService(const WifiService&) = delete;
     WifiService& operator=(const WifiService&) = delete;
 
-    void Start();
+    // ap_ssid: name of the provisioning hotspot
+    void Start(const std::string& ap_ssid);
     void SetNetworkEventCallback(NetworkEventCallback callback);
     // Stop the station and open the provisioning hotspot
     void EnterWifiConfigMode();
@@ -47,10 +48,12 @@ private:
 
     void TryWifiConnect();
     void StartWifiConfigMode();
+    void ApplyApSsid();
     void OnNetworkEvent(NetworkEvent event, const std::string& data = "");
     static void OnWifiConnectTimeout(void* arg);
 
     esp_timer_handle_t connect_timer_ = nullptr;
+    std::string ap_ssid_;
     NetworkEventCallback network_event_callback_;
 };
 

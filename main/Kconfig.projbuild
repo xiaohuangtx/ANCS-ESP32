@@ -2,11 +2,12 @@ menu "ANCS-ESP32 Configuration"
 
 menu "Bluetooth (ANCS)"
 
-config BLE_DEVICE_NAME
-    string "BLE device name"
-    default "ANCS-ESP32"
+config BLE_DEVICE_NAME_PREFIX
+    string "BLE device name prefix"
+    default "ANCS"
     help
-        Name shown in the iPhone Bluetooth settings.
+        Name shown in the iPhone Bluetooth settings is "<prefix>-XXXXXX",
+        where XXXXXX is the last 3 bytes of the base MAC address.
 
 config ANCS_IGNORE_PREEXISTING
     bool "Ignore pre-existing notifications"
@@ -47,7 +48,8 @@ config WIFI_AP_SSID_PREFIX
     default "ANCS"
     help
         When no Wi-Fi is configured, the device opens a hotspot named
-        "<prefix>-XXXX". Connect to it and open the web page to configure Wi-Fi.
+        "<prefix>-XXXXXX" (last 3 bytes of the base MAC address). Connect to it
+        and open the web page to configure Wi-Fi.
 
 endmenu
 

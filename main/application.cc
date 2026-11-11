@@ -6,11 +6,22 @@
 #include <esp_log.h>
 #include <esp_app_desc.h>
 #include <esp_heap_caps.h>
+#include <esp_mac.h>
 
 #define TAG "Application"
 
 // Heap statistics interval
 static constexpr int kClockTickSeconds = 60;
+
+// "<prefix>-XXXXXX" with the last 3 bytes of the base MAC, so the BLE name and
+// the provisioning hotspot SSID are the same
+static std::string MakeDeviceName(const char* prefix) {
+    uint8_t mac[6] = {0};
+    esp_efuse_mac_get_default(mac);
+    char name[33];
+    snprintf(name, sizeof(name), "%s-%02X%02X%02X", prefix, mac[3], mac[4], mac[5]);
+    return name;
+}
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
@@ -55,7 +66,7 @@ void Application::Initialize() {
             xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_DISCONNECTED);
         }
     });
-    wifi.Start();
+    wifi.Start(MakeDeviceName(CONFIG_WIFI_AP_SSID_PREFIX));
 
     // BLE: advertise and wait for the iPhone
     auto& ble = BleManager::GetInstance();
@@ -69,7 +80,7 @@ void Application::Initialize() {
             OnNotification(notification);
         });
     });
-    ble.Initialize(CONFIG_BLE_DEVICE_NAME);
+    ble.Initialize(MakeDeviceName(CONFIG_BLE_DEVICE_NAME_PREFIX));
 
     esp_timer_start_periodic(clock_timer_handle_, kClockTickSeconds * 1000000ULL);
 }
