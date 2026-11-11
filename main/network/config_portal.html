@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Wi-Fi 配网</title>
+<style>
+:root { --bg:#f4f5f7; --card:#fff; --text:#1f2329; --muted:#8a919f; --line:#e5e6eb; --primary:#3370ff; --danger:#f54a45; --ok:#34c724; }
+* { box-sizing:border-box; }
+body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); -webkit-text-size-adjust:100%; }
+header { background:#1f2329; color:#fff; padding:14px 16px; }
+header h1 { font-size:17px; margin:0; font-weight:600; }
+header .dev { color:#aab; font-size:12px; }
+main { max-width:480px; margin:0 auto; padding:12px; }
+.card { background:var(--card); border-radius:10px; padding:14px 16px; margin-bottom:12px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+.card h2 { font-size:15px; margin:0 0 8px; display:flex; align-items:center; gap:8px; }
+.card h2 .spacer { flex:1; }
+.card h2 small { color:var(--muted); font-weight:400; font-size:12px; }
+label { display:block; margin:10px 0 4px; color:var(--muted); font-size:13px; }
+input[type=text],input[type=password] { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:8px; font-size:16px; background:#fff; color:var(--text); -webkit-appearance:none; }
+input:focus { outline:none; border-color:var(--primary); }
+.check { display:flex; align-items:center; gap:6px; margin-top:8px; color:var(--muted); font-size:13px; }
+.hint { color:var(--muted); font-size:12px; margin-top:8px; }
+button { padding:8px 16px; border-radius:8px; border:1px solid var(--line); background:#fff; cursor:pointer; font-size:15px; color:var(--text); }
+button.primary { background:var(--primary); border-color:var(--primary); color:#fff; width:100%; padding:11px; margin-top:14px; font-size:16px; }
+button.danger { color:var(--danger); border-color:var(--danger); }
+button.block { width:100%; margin-top:10px; }
+button:disabled { opacity:.5; }
+.err { color:var(--danger); font-size:13px; margin-top:10px; display:none; white-space:pre-wrap; }
+.empty { color:var(--muted); text-align:center; padding:16px 0; font-size:13px; }
+.ap { display:flex; align-items:center; gap:10px; width:100%; padding:11px 4px; border:none; border-top:1px solid var(--line); border-radius:0; background:none; text-align:left; }
+.ap:first-child { border-top:none; }
+.ap.sel { background:#eef3ff; }
+.ap .name { flex:1; word-break:break-all; }
+.ap svg { width:14px; height:14px; color:var(--muted); flex:none; }
+.sig { display:inline-flex; align-items:flex-end; gap:2px; height:14px; flex:none; }
+.sig i { width:3px; background:#d0d3da; border-radius:1px; }
+.sig i:nth-child(1) { height:4px; } .sig i:nth-child(2) { height:7px; } .sig i:nth-child(3) { height:10px; } .sig i:nth-child(4) { height:14px; }
+.sig.s1 i:nth-child(-n+1), .sig.s2 i:nth-child(-n+2), .sig.s3 i:nth-child(-n+3), .sig.s4 i { background:var(--primary); }
+.saved { display:flex; align-items:center; gap:8px; border-top:1px solid var(--line); padding:8px 0; }
+.saved:first-child { border-top:none; }
+.saved .name { flex:1; word-break:break-all; }
+.saved button { padding:4px 12px; font-size:13px; }
+.spin { width:16px; height:16px; border:2px solid var(--line); border-top-color:var(--primary); border-radius:50%; animation:spin .8s linear infinite; display:inline-block; }
+@keyframes spin { to { transform:rotate(360deg); } }
+.overlay { position:fixed; inset:0; background:rgba(31,35,41,.55); display:none; align-items:center; justify-content:center; padding:24px; z-index:10; }
+.overlay.show { display:flex; }
+.overlay .box { background:#fff; border-radius:12px; padding:24px; text-align:center; max-width:320px; width:100%; }
+.overlay .box .spin { width:36px; height:36px; border-width:3px; }
+.overlay .box p { margin:12px 0 0; word-break:break-all; }
+.overlay .box .hint { margin-top:6px; }
+#done { display:none; text-align:center; padding:28px 16px; }
+#done svg { width:64px; height:64px; color:var(--ok); }
+#done h2 { justify-content:center; font-size:18px; margin:12px 0 8px; }
+#done p { margin:8px 0; word-break:break-all; }
+#done code { background:#f0f1f5; padding:1px 6px; border-radius:4px; }
+</style>
+</head>
+<body>
+<header><h1>Wi-Fi 配网</h1><div class="dev" id="dev"></div></header>
+<main>
+
+<div id="setup">
+  <form class="card" id="form" autocomplete="off">
+    <h2>连接 Wi-Fi</h2>
+    <label for="ssid">Wi-Fi 名称</label>
+    <input type="text" id="ssid" maxlength="32" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="从下方列表选择，或手动输入">
+    <label for="pass">密码</label>
+    <input type="password" id="pass" maxlength="64" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="开放网络留空">
+    <div class="check"><input type="checkbox" id="showpass"><span>显示密码</span></div>
+    <div class="err" id="err"></div>
+    <button type="submit" class="primary" id="connect">连接</button>
+    <div class="hint" id="bandhint"></div>
+  </form>
+
+  <div class="card">
+    <h2>附近的 Wi-Fi<span class="spacer"></span><span class="spin" id="scanning"></span></h2>
+    <div id="aps"><div class="empty">正在扫描…</div></div>
+  </div>
+
+  <div class="card" id="savedcard" style="display:none">
+    <h2>已保存的 Wi-Fi<span class="spacer"></span><small id="savedcount"></small></h2>
+    <div id="saved"></div>
+    <div class="hint">设备会自动连接信号最强的已保存 Wi-Fi。</div>
+    <button type="button" class="block" id="exit">退出配网，连接已保存的 Wi-Fi</button>
+  </div>
+</div>
+
+<div class="card" id="done">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12.5l2.7 2.7L16 9.8"/></svg>
+  <h2 id="donetitle"></h2>
+  <div id="donebody"></div>
+</div>
+
+</main>
+
+<div class="overlay" id="overlay">
+  <div class="box"><span class="spin"></span><p id="overlaytext"></p><div class="hint">正在验证密码，最长约半分钟，请勿离开本页</div></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const LOCK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
+const SCAN_INTERVAL_MS = 5000;
+let device = '';
+let finished = false;
+let busy = false;
+
+async function api(url, opts) {
+  const r = await fetch(url, Object.assign({ cache: 'no-store' }, opts));
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+  return data;
+}
+
+function sendJson(url, method, body) {
+  return api(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+}
+
+function showError(message) {
+  $('err').textContent = message || '';
+  $('err').style.display = message ? 'block' : 'none';
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function signal(rssi) {
+  const level = rssi >= -55 ? 4 : rssi >= -67 ? 3 : rssi >= -78 ? 2 : 1;
+  const s = el('span', 'sig s' + level);
+  s.title = rssi + ' dBm';
+  for (let i = 0; i < 4; i++) s.appendChild(el('i'));
+  return s;
+}
+
+// SSIDs come from the air: only ever set them as text
+function renderAps(aps) {
+  const list = $('aps');
+  list.textContent = '';
+  if (!aps.length) {
+    list.appendChild(el('div', 'empty', '正在扫描…'));
+    return;
+  }
+  for (const ap of aps) {
+    const row = el('button', 'ap');
+    row.type = 'button';
+    if (ap.ssid === $('ssid').value) row.classList.add('sel');
+    row.appendChild(el('span', 'name', ap.ssid));
+    if (ap.secure) row.insertAdjacentHTML('beforeend', LOCK);
+    row.appendChild(signal(ap.rssi));
+    row.onclick = () => pick(ap);
+    list.appendChild(row);
+  }
+}
+
+function pick(ap) {
+  $('ssid').value = ap.ssid;
+  $('pass').value = '';
+  $('pass').placeholder = ap.secure ? '' : '开放网络，无需密码';
+  showError('');
+  document.querySelectorAll('.ap').forEach(r => r.classList.toggle('sel', r.firstChild.textContent === ap.ssid));
+  if (ap.secure) $('pass').focus();
+}
+
+function renderSaved(saved, max) {
+  $('savedcard').style.display = saved.length ? '' : 'none';
+  $('savedcount').textContent = saved.length + ' / ' + max;
+  const list = $('saved');
+  list.textContent = '';
+  for (const w of saved) {
+    const row = el('div', 'saved');
+    row.appendChild(el('span', 'name', w.ssid));
+    const del = el('button', 'danger', '删除');
+    del.type = 'button';
+    del.onclick = async () => {
+      if (!confirm('删除已保存的 Wi-Fi「' + w.ssid + '」？')) return;
+      del.disabled = true;
+      try {
+        await sendJson('/api/saved', 'DELETE', { ssid: w.ssid });
+      } catch (e) {
+        alert(e.message);
+      }
+      loadStatus();
+    };
+    row.appendChild(del);
+    list.appendChild(row);
+  }
+}
+
+async function loadStatus() {
+  try {
+    const d = await api('/api/status');
+    device = d.device;
+    $('dev').textContent = d.device;
+    $('bandhint').textContent = d.support_5g ? '' : '本设备只支持 2.4 GHz Wi-Fi。';
+    renderSaved(d.saved, d.max);
+  } catch (e) {}
+}
+
+async function scan() {
+  if (finished) return;
+  if (!busy) {
+    try {
+      const d = await api('/api/scan');
+      $('scanning').style.visibility = d.aps.length ? 'hidden' : 'visible';
+      renderAps(d.aps);
+    } catch (e) {}
+  }
+  setTimeout(scan, SCAN_INTERVAL_MS);
+}
+
+function finish(title, nodes) {
+  finished = true;
+  $('setup').style.display = 'none';
+  $('donetitle').textContent = title;
+  const body = $('donebody');
+  body.textContent = '';
+  for (const n of nodes) body.appendChild(n);
+  $('done').style.display = 'block';
+}
+
+// Builds a paragraph from strings (text) and [string] (code)
+function para(...parts) {
+  const p = el('p');
+  for (const part of parts) p.appendChild(Array.isArray(part) ? el('code', '', part[0]) : document.createTextNode(part));
+  return p;
+}
+
+$('showpass').onchange = () => { $('pass').type = $('showpass').checked ? 'text' : 'password'; };
+
+$('form').onsubmit = async e => {
+  e.preventDefault();
+  const ssid = $('ssid').value;
+  const password = $('pass').value;
+  if (!ssid) { showError('请选择或输入 Wi-Fi 名称'); return; }
+  showError('');
+  busy = true;
+  $('connect').disabled = true;
+  $('overlaytext').textContent = '正在连接 ' + ssid + '…';
+  $('overlay').classList.add('show');
+  try {
+    const d = await sendJson('/api/connect', 'POST', { ssid, password });
+    const nodes = [para('设备已成功连接到 ', [d.ssid], '。')];
+    if (d.ip) {
+      nodes.push(para('热点 ', [device], ' 即将关闭。请将手机连回该 Wi-Fi，然后访问 ', ['http://' + d.ip + '/'], ' 打开管理后台。'));
+    } else {
+      nodes.push(para('热点 ', [device], ' 即将关闭，请将手机连回该 Wi-Fi。'));
+    }
+    finish('配网成功', nodes);
+  } catch (err) {
+    if (err instanceof TypeError) {
+      // The hotspot follows the router to its channel during the test, which
+      // can drop the phone's connection to it
+      showError('与设备的连接中断。若热点随后消失，说明配网已成功；否则请重新连接热点 ' + device + ' 后再试。');
+    } else {
+      showError(err.message);
+    }
+  } finally {
+    $('overlay').classList.remove('show');
+    $('connect').disabled = false;
+    busy = false;
+  }
+};
+
+$('exit').onclick = async () => {
+  $('exit').disabled = true;
+  try {
+    await sendJson('/api/exit', 'POST');
+    finish('正在退出配网', [para('设备将连接已保存的 Wi-Fi，热点 ', [device], ' 即将关闭。')]);
+  } catch (e) {
+    alert(e.message);
+    $('exit').disabled = false;
+  }
+};
+
+loadStatus();
+scan();
+</script>
+</body>
+</html>

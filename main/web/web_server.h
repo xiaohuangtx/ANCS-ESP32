@@ -15,7 +15,7 @@
  * back to CONFIG_WEB_ADMIN_PASSWORD), every request needs HTTP Basic auth
  * with user "admin".
  *
- * The provisioning hotspot runs its own server on the same
+ * The provisioning hotspot runs its own server (ConfigPortal) on the same
  * port, so this one must be stopped before entering Wi-Fi config mode.
  */
 class WebServer {

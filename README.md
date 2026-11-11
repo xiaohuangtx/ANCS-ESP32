@@ -26,19 +26,23 @@ ANCS-ESP32/
     ├── application.cc/h   # 主事件循环、Schedule()、模块组装
     ├── settings.cc/h      # NVS 封装
     ├── Kconfig.projbuild  # menuconfig 配置项
-    ├── idf_component.yml  # 依赖：espressif/button
+    ├── idf_component.yml  # 依赖：espressif/button、espressif/cjson
     ├── ble/
     │   ├── ble_manager.*  # NimBLE 初始化、广播、GAP 事件、配对绑定
     │   ├── ancs_client.*  # ANCS 协议实现
     │   └── ancs_defs.*    # ANCS 常量定义
     ├── network/
-    │   └── wifi_service.* # Wi-Fi 连接 + 热点配网
+    │   ├── wifi_service.* # Wi-Fi 连接（扫描 → 连接最强的已保存 Wi-Fi → 重试）+ 配网模式切换
+    │   ├── wifi_store.*   # 已保存的 Wi-Fi（NVS namespace `wifi`）
+    │   ├── config_portal.* # 配网热点的网页（config_portal.html）+ 强制门户跳转
+    │   └── dns_server.*   # 配网热点的 DNS，所有域名都解析到 192.168.4.1
     ├── notification/
     │   ├── notification.* # 通知数据结构、控制台打印、JSON 序列化
     │   ├── notification_history.* # 最近通知记录（内存）
     │   └── webhook_client.*
     ├── web/
     │   ├── web_server.*   # 管理后台 HTTP 服务 + OTA
+    │   ├── http_utils.*   # JSON 请求 / 响应工具（管理后台与配网页面共用）
     │   └── admin.html     # 管理后台页面（编译时嵌入固件）
     └── peripherals/
         └── button.*       # 按键封装
@@ -62,7 +66,7 @@ Flash 较小的板子可在 menuconfig 中把 `Partition Table > Custom partitio
 
 ## 使用
 
-1. **配网**：首次启动没有 Wi-Fi 配置，设备开启热点 `ANCS-XXXXXX`（XXXXXX 为 MAC 地址后 3 字节）。手机连接后打开 `http://192.168.4.1` 选择 Wi-Fi 并输入密码。之后长按 BOOT 键可重新进入配网。
+1. **配网**：首次启动没有 Wi-Fi 配置，设备开启热点 `ANCS-XXXXXX`（XXXXXX 为 MAC 地址后 3 字节）。手机连接后一般会自动弹出配网页面（没有弹出就手动打开 `http://192.168.4.1`），从附近的 Wi-Fi 中选择（或手动输入隐藏网络的名称）并输入密码。设备会先实际连接一次验证密码，成功后保存、显示设备在该 Wi-Fi 下的 IP 地址，几秒后关闭热点并连接。页面上也可以删除已保存的 Wi-Fi，或直接退出配网去连接已保存的 Wi-Fi。之后长按 BOOT 键可重新进入配网。
 2. **连接 iPhone**：打开 iPhone「设置 > 蓝牙」，在「其他设备」中点击 `ANCS-XXXXXX`（与热点名称相同）→ 配对。
 3. 首次连接 iOS 会询问是否允许该设备接收通知，选择允许；或在「设置 > 蓝牙 > ANCS-XXXXXX (i)」中打开 **「共享系统通知」**。
 4. 收到通知后串口输出示例：
