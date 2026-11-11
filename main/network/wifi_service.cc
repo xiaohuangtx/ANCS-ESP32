@@ -20,6 +20,10 @@ static constexpr int kMaxScanIntervalSec = 300;
 static constexpr int kMaxRetries = 5;
 // Refreshes the network list of the setup page
 static constexpr int kConfigScanIntervalSec = 10;
+// Minimum time in an automatically opened config mode before it is left by
+// itself, after an auto exit failed to connect; doubles on each failure
+static constexpr int kMinAutoExitHoldSec = 60;
+static constexpr int kMaxAutoExitHoldSec = 600;
 static constexpr int kQueueSize = 16;
 static constexpr int kTaskStackSize = 4096;
 
@@ -225,7 +229,10 @@ void WifiService::HandleMessage(const Message& message) {
         case MessageType::ConnectTimeout:
             if (mode == Mode::Station && !IsConnected()) {
                 ESP_LOGW(TAG, "Not connected after %d s, opening the hotspot", kConnectTimeoutSec);
-                StartConfigMode();
+                if (auto_exited_) {
+                    auto_exit_failures_++;
+                }
+                StartConfigMode(true);
             }
             break;
         case MessageType::StaStart:
@@ -443,6 +450,8 @@ void WifiService::OnStationGotIp(uint32_t ip) {
     retries_ = 0;
     candidates_.clear();
     scan_interval_sec_ = kMinScanIntervalSec;
+    auto_exited_ = false;
+    auto_exit_failures_ = 0;
 
     wifi_ap_record_t info;
     if (esp_wifi_sta_get_ap_info(&info) == ESP_OK) {
@@ -454,7 +463,9 @@ void WifiService::OnStationGotIp(uint32_t ip) {
 
 // ==================== Config mode ====================
 
-void WifiService::StartConfigMode() {
+void WifiService::StartConfigMode(bool auto_exit) {
+    // A request while the hotspot is already open keeps it open
+    auto_exit_ = auto_exit;
     if (mode_ == Mode::Config) {
         return;
     }
@@ -465,6 +476,8 @@ void WifiService::StartConfigMode() {
     }
 
     mode_ = Mode::Config;
+    config_start_us_ = esp_timer_get_time();
+    auto_exited_ = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         scan_results_.clear();
@@ -540,8 +553,43 @@ void WifiService::OnConfigScanDone(bool success) {
         std::lock_guard<std::mutex> lock(mutex_);
         scan_results_ = std::move(networks);
     }
+    if (success && !testing_ && ShouldAutoExit(records)) {
+        auto_exited_ = true;
+        StopConfigMode();
+        return;
+    }
     esp_timer_stop(scan_timer_);
     esp_timer_start_once(scan_timer_, kConfigScanIntervalSec * 1000000ULL);
+}
+
+bool WifiService::ShouldAutoExit(const std::vector<wifi_ap_record_t>& records) const {
+    if (!auto_exit_) {
+        return false;
+    }
+    int hold_sec = 0;
+    if (auto_exit_failures_ > 0) {
+        hold_sec = std::min(kMinAutoExitHoldSec << std::min(auto_exit_failures_ - 1, 4), kMaxAutoExitHoldSec);
+    }
+    if (esp_timer_get_time() - config_start_us_ < hold_sec * 1000000LL) {
+        return false;
+    }
+    // Someone may be setting the device up
+    wifi_sta_list_t clients;
+    if (esp_wifi_ap_get_sta_list(&clients) != ESP_OK || clients.num > 0) {
+        return false;
+    }
+    auto saved = store_.GetAll();
+    for (auto& record : records) {
+        std::string ssid(reinterpret_cast<const char*>(record.ssid));
+        bool known = std::any_of(saved.begin(), saved.end(), [&](const WifiCredential& network) {
+            return network.ssid == ssid;
+        });
+        if (known) {
+            ESP_LOGI(TAG, "Saved network %s is in range, leaving config mode", ssid.c_str());
+            return true;
+        }
+    }
+    return false;
 }
 
 // Runs in the HTTP server task of the portal. The station is otherwise idle

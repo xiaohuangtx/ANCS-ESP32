@@ -10,6 +10,7 @@
 #include <esp_event.h>
 #include <esp_netif.h>
 #include <esp_timer.h>
+#include <esp_wifi_types.h>
 
 #include <atomic>
 #include <functional>
@@ -52,6 +53,13 @@ struct ScannedNetwork {
  * If no network is saved, or the first connection does not succeed within
  * 60 s, the device opens an open hotspot named after the device. Joining it
  * pops up the setup page (ConfigPortal, http://192.168.4.1).
+ *
+ * A hotspot opened by that timeout closes again by itself once a saved
+ * network shows up in its scans while nobody is on the hotspot, e.g. when the
+ * router comes up after the device. If that network still cannot be
+ * connected, the next hotspot stays open for at least 1 min, then 2, 4 ... up
+ * to 10 min before closing by itself. A hotspot opened on request
+ * (EnterWifiConfigMode) stays open until it is left from the setup page.
  *
  * All Wi-Fi state changes run in one task: driver events, timers and the
  * public methods only post messages to it. The network event callback is
@@ -144,10 +152,12 @@ private:
     void SetState(bool connected, const std::string& ssid, const std::string& ip);
 
     // Config mode
-    void StartConfigMode();
+    // auto_exit: leave again by itself once a saved network can be seen
+    void StartConfigMode(bool auto_exit = false);
     void StopConfigMode();
     void StartConfigScan();
     void OnConfigScanDone(bool success);
+    bool ShouldAutoExit(const std::vector<wifi_ap_record_t>& records) const;
     std::string TestConnect(const std::string& ssid, const std::string& password,
                             std::string& ip, uint8_t& channel);
 
@@ -173,6 +183,14 @@ private:
     bool connecting_ = false;
     int retries_ = 0;
     int scan_interval_sec_ = 0;
+
+    // Config mode state, only used by the Wi-Fi task
+    bool auto_exit_ = false;
+    int64_t config_start_us_ = 0;
+    // The station was started by an auto exit and has not connected yet
+    bool auto_exited_ = false;
+    // Auto exits in a row that did not lead to a connection
+    int auto_exit_failures_ = 0;
 
     // Read by the getters
     mutable std::mutex mutex_;
