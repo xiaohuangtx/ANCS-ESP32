@@ -40,10 +40,11 @@ void Application::Initialize() {
 
     // BLE: advertise and wait for the iPhone
     auto& ble = BleManager::GetInstance();
-    ble.SetConnectionCallback([](bool connected) {
-        ESP_LOGI(TAG, "iPhone %s", connected ? "connected" : "disconnected");
+    ble.SetConnectionCallback([](bool connected, int connection_count) {
+        ESP_LOGI(TAG, "Device %s, %d/%d connected", connected ? "connected" : "disconnected",
+                 connection_count, BleManager::kMaxConnections);
     });
-    ble.GetAncsClient().SetNotificationCallback([this](const AncsNotification& notification) {
+    ble.SetNotificationCallback([this](const AncsNotification& notification) {
         // Called from the NimBLE host task: hand over to the main task
         Schedule([this, notification]() {
             OnNotification(notification);

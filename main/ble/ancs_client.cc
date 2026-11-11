@@ -2,6 +2,8 @@
 
 #include <esp_log.h>
 #include <nimble/nimble_port.h>
+#include <services/gap/ble_svc_gap.h>
+#include <algorithm>
 #include <cstring>
 #include <cstdlib>
 
@@ -20,6 +22,8 @@ static const ble_uuid128_t kControlPointUuid = BLE_UUID128_INIT(
 static const ble_uuid128_t kDataSourceUuid = BLE_UUID128_INIT(
     0xfb, 0x7b, 0x7c, 0xce, 0x6a, 0xb3, 0x44, 0xbe, 0xb5, 0x4b, 0xd6, 0x24, 0xe9, 0xc6, 0xea, 0x22);
 static const ble_uuid16_t kCccdUuid = BLE_UUID16_INIT(BLE_GATT_DSC_CLT_CFG_UUID16);
+// GAP Device Name of the peer, e.g. "John's iPhone"
+static const ble_uuid16_t kDeviceNameUuid = BLE_UUID16_INIT(BLE_SVC_GAP_CHR_UUID16_DEVICE_NAME);
 
 // Attributes requested for every notification, in this order
 struct RequestedAttribute {
@@ -88,6 +92,15 @@ void AncsClient::OnEncrypted(uint16_t conn_handle) {
     }
     ResetConnectionState();
     conn_handle_ = conn_handle;
+
+    struct ble_gap_conn_desc desc;
+    if (ble_gap_conn_find(conn_handle, &desc) == 0) {
+        // Identity address: stable for a bonded iPhone even though it uses private addresses over the air
+        const uint8_t* a = desc.peer_id_addr.val;
+        char addr[18];
+        snprintf(addr, sizeof(addr), "%02x:%02x:%02x:%02x:%02x:%02x", a[5], a[4], a[3], a[2], a[1], a[0]);
+        peer_address_ = addr;
+    }
     StartDiscovery();
 }
 
@@ -96,6 +109,12 @@ void AncsClient::OnDisconnected() {
 }
 
 void AncsClient::ResetConnectionState() {
+    // Report notifications already fetched, even though their app name is unknown
+    for (auto& notification : waiting_for_app_name_) {
+        Emit(notification);
+    }
+    waiting_for_app_name_.clear();
+
     ble_npl_callout_stop(&retry_timer_);
     ble_npl_callout_stop(&request_timer_);
     state_ = State::kIdle;
@@ -112,11 +131,8 @@ void AncsClient::ResetConnectionState() {
     current_request_.reset();
     control_point_write_pending_ = false;
     data_buffer_.clear();
-    // Report notifications already fetched, even though their app name is unknown
-    for (auto& notification : waiting_for_app_name_) {
-        Emit(notification);
-    }
-    waiting_for_app_name_.clear();
+    peer_name_.clear();
+    peer_address_.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +152,40 @@ void AncsClient::StartDiscovery() {
     data_source_cccd_ = 0;
     characteristic_def_handles_.clear();
 
-    ESP_LOGI(TAG, "Discovering ANCS service");
+    if (peer_name_.empty()) {
+        ReadPeerName();
+    } else {
+        DiscoverService();
+    }
+}
+
+void AncsClient::ReadPeerName() {
+    state_ = State::kReadingPeerName;
+    int rc = ble_gattc_read_by_uuid(conn_handle_, 1, 0xffff, &kDeviceNameUuid.u, OnPeerNameRead, this);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "Failed to read peer name, rc=%d", rc);
+        DiscoverService();
+    }
+}
+
+int AncsClient::HandlePeerNameRead(const struct ble_gatt_error* error, struct ble_gatt_attr* attr) {
+    if (error->status == 0 && attr != nullptr) {
+        char name[64];
+        uint16_t len = std::min<uint16_t>(OS_MBUF_PKTLEN(attr->om), sizeof(name));
+        os_mbuf_copydata(attr->om, 0, len, name);
+        peer_name_.assign(name, len);
+        return 0;
+    }
+    if (error->status != BLE_HS_EDONE) {
+        ESP_LOGW(TAG, "Failed to read peer name, status=%d", error->status);
+    }
+    ESP_LOGI(TAG, "conn=%d peer \"%s\" (%s)", conn_handle_, peer_name_.c_str(), peer_address_.c_str());
+    DiscoverService();
+    return 0;
+}
+
+void AncsClient::DiscoverService() {
+    ESP_LOGI(TAG, "conn=%d discovering ANCS service", conn_handle_);
     state_ = State::kDiscoveringService;
     int rc = ble_gattc_disc_svc_by_uuid(conn_handle_, &kAncsServiceUuid.u, OnServiceDiscovered, this);
     if (rc != 0) {
@@ -172,9 +221,9 @@ int AncsClient::HandleServiceDiscovered(const struct ble_gatt_error* error, cons
     }
 
     if (service_start_handle_ == 0) {
-        ESP_LOGW(TAG, "ANCS service not found. On the iPhone open Settings > Bluetooth > (i) next to this device "
-                      "and enable \"Share System Notifications\". Retrying in %lu ms",
-                 (unsigned long)kDiscoveryRetryMs);
+        ESP_LOGW(TAG, "ANCS service not found on \"%s\". On the iPhone open Settings > Bluetooth > (i) next to "
+                      "this device and enable \"Share System Notifications\". Retrying in %lu ms",
+                 peer_name_.c_str(), (unsigned long)kDiscoveryRetryMs);
         ScheduleRetry();
         return 0;
     }
@@ -306,7 +355,7 @@ int AncsClient::HandleCccdWritten(const struct ble_gatt_error* error, uint16_t a
 
     // Subscribing the Notification Source makes iOS replay existing notifications
     state_ = State::kReady;
-    ESP_LOGI(TAG, "ANCS ready, waiting for notifications");
+    ESP_LOGI(TAG, "conn=%d ANCS ready on \"%s\", waiting for notifications", conn_handle_, peer_name_.c_str());
     ProcessNextRequest();
     return 0;
 }
@@ -680,9 +729,15 @@ void AncsClient::OnAppNameReady(const std::string& app_id, const std::string& ap
 }
 
 void AncsClient::Emit(const AncsNotification& notification) {
-    if (notification_callback_) {
-        notification_callback_(notification);
+    if (!notification_callback_) {
+        return;
     }
+    // Tag every notification with the device it came from
+    AncsNotification tagged = notification;
+    tagged.conn_handle = conn_handle_;
+    tagged.peer_name = peer_name_;
+    tagged.peer_address = peer_address_;
+    notification_callback_(tagged);
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +769,15 @@ int AncsClient::OnDescriptorDiscovered(uint16_t conn_handle, const struct ble_ga
         return 0;  // Stale procedure from a previous connection
     }
     return self->HandleDescriptorDiscovered(error, chr_val_handle, dsc);
+}
+
+int AncsClient::OnPeerNameRead(uint16_t conn_handle, const struct ble_gatt_error* error,
+                               struct ble_gatt_attr* attr, void* arg) {
+    auto* self = static_cast<AncsClient*>(arg);
+    if (conn_handle != self->conn_handle_) {
+        return 0;  // Stale procedure from a previous connection
+    }
+    return self->HandlePeerNameRead(error, attr);
 }
 
 int AncsClient::OnCccdWritten(uint16_t conn_handle, const struct ble_gatt_error* error,

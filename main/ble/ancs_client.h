@@ -20,11 +20,13 @@
  *
  * The iPhone is the GATT server (Notification Provider), the ESP32 is the
  * GATT client (Notification Consumer). Flow:
- *   1. Link encrypted -> discover ANCS service and its 3 characteristics
+ *   1. Link encrypted -> read the peer's device name -> discover ANCS
+ *      service and its 3 characteristics
  *   2. Subscribe Data Source, then Notification Source
  *   3. Notification Source event -> write Get Notification Attributes to the
  *      Control Point -> reassemble the response from Data Source
  *
+ * One instance serves one connection; BleManager owns one per connection slot.
  * All Control Point writes go through one queue so that only one ATT request
  * is in flight at a time. Except for PerformAction(), every method must be
  * called from the NimBLE host task.
@@ -49,6 +51,7 @@ public:
     bool OnNotifyRx(uint16_t attr_handle, struct os_mbuf* om);
 
     bool IsReady() const { return state_ == State::kReady; }
+    uint16_t GetConnHandle() const { return conn_handle_; }
     static const ble_uuid128_t& ServiceUuid();
 
     // Thread-safe: trigger the positive (e.g. answer) or negative (e.g. decline) action
@@ -57,6 +60,7 @@ public:
 private:
     enum class State {
         kIdle,
+        kReadingPeerName,
         kDiscoveringService,
         kDiscoveringCharacteristics,
         kDiscoveringDescriptors,
@@ -80,11 +84,14 @@ private:
 
     // Discovery
     void StartDiscovery();
+    void ReadPeerName();
+    void DiscoverService();
     void ScheduleRetry();
     void DiscoverDescriptors(uint16_t val_handle);
     void WriteCccd(uint16_t cccd_handle);
     uint16_t GetCharacteristicEndHandle(uint16_t val_handle) const;
 
+    int HandlePeerNameRead(const struct ble_gatt_error* error, struct ble_gatt_attr* attr);
     int HandleServiceDiscovered(const struct ble_gatt_error* error, const struct ble_gatt_svc* service);
     int HandleCharacteristicDiscovered(const struct ble_gatt_error* error, const struct ble_gatt_chr* chr);
     int HandleDescriptorDiscovered(const struct ble_gatt_error* error, uint16_t chr_val_handle, const struct ble_gatt_dsc* dsc);
@@ -114,6 +121,8 @@ private:
                                           const struct ble_gatt_chr* chr, void* arg);
     static int OnDescriptorDiscovered(uint16_t conn_handle, const struct ble_gatt_error* error,
                                       uint16_t chr_val_handle, const struct ble_gatt_dsc* dsc, void* arg);
+    static int OnPeerNameRead(uint16_t conn_handle, const struct ble_gatt_error* error,
+                              struct ble_gatt_attr* attr, void* arg);
     static int OnCccdWritten(uint16_t conn_handle, const struct ble_gatt_error* error,
                              struct ble_gatt_attr* attr, void* arg);
     static int OnControlPointWritten(uint16_t conn_handle, const struct ble_gatt_error* error,
@@ -125,6 +134,8 @@ private:
     NotificationCallback notification_callback_;
     State state_ = State::kIdle;
     uint16_t conn_handle_ = BLE_HS_CONN_HANDLE_NONE;
+    std::string peer_name_;
+    std::string peer_address_;
 
     // GATT handles
     uint16_t service_start_handle_ = 0;

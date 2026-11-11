@@ -47,7 +47,9 @@ void BleManager::Initialize(const std::string& device_name) {
     // Bonds are persisted in NVS (CONFIG_BT_NIMBLE_NVS_PERSIST)
     ble_store_config_init();
 
-    ancs_client_.Initialize();
+    for (auto& link : links_) {
+        link.ancs.Initialize();
+    }
     ble_npl_event_init(&clear_bonds_event_, OnClearBondsEvent, this);
     ble_npl_event_init(&advertise_event_, OnAdvertiseEvent, this);
     ble_npl_callout_init(&advertise_retry_timer_, nimble_port_get_dflt_eventq(), OnAdvertiseRetry, this);
@@ -130,9 +132,9 @@ void BleManager::StartAdvertising() {
     adv_params.itvl_max = BLE_GAP_ADV_ITVL_MS(150);
     rc = ble_gap_adv_start(own_addr_type_, nullptr, BLE_HS_FOREVER, &adv_params, GapEventHandler, this);
     if (rc == BLE_HS_ENOMEM) {
-        // The previous link is still being released. Do not rely on a later
+        // A previous link is still being released. Do not rely on a later
         // disconnect event to restart advertising: retry until it succeeds.
-        if (conn_handle_ == BLE_HS_CONN_HANDLE_NONE) {
+        if (GetConnectionCount() < kMaxConnections) {
             ESP_LOGI(TAG, "Connection slot busy, retrying advertising in 500 ms");
             ble_npl_callout_reset(&advertise_retry_timer_, ble_npl_time_ms_to_ticks32(500));
         }
@@ -142,7 +144,7 @@ void BleManager::StartAdvertising() {
         ESP_LOGE(TAG, "Failed to start advertising, rc=%d", rc);
         return;
     }
-    ESP_LOGI(TAG, "Advertising started");
+    ESP_LOGI(TAG, "Advertising started (%d/%d connected)", GetConnectionCount(), kMaxConnections);
 }
 
 void BleManager::ScheduleAdvertising() {
@@ -158,9 +160,51 @@ void BleManager::OnAdvertiseEvent(struct ble_npl_event* ev) {
 
 void BleManager::OnAdvertiseRetry(struct ble_npl_event* ev) {
     auto* self = static_cast<BleManager*>(ble_npl_event_get_arg(ev));
-    if (self->conn_handle_ == BLE_HS_CONN_HANDLE_NONE) {
+    if (self->GetConnectionCount() < kMaxConnections) {
         self->StartAdvertising();
     }
+}
+
+BleManager::Link* BleManager::FindLink(uint16_t conn_handle) {
+    for (auto& link : links_) {
+        if (link.conn_handle == conn_handle) {
+            return &link;
+        }
+    }
+    return nullptr;
+}
+
+BleManager::Link* BleManager::AllocateLink(uint16_t conn_handle) {
+    Link* link = FindLink(BLE_HS_CONN_HANDLE_NONE);
+    if (link != nullptr) {
+        link->conn_handle = conn_handle;
+    }
+    return link;
+}
+
+int BleManager::GetConnectionCount() const {
+    int count = 0;
+    for (auto& link : links_) {
+        if (link.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+            count++;
+        }
+    }
+    return count;
+}
+
+void BleManager::SetNotificationCallback(AncsClient::NotificationCallback callback) {
+    for (auto& link : links_) {
+        link.ancs.SetNotificationCallback(callback);
+    }
+}
+
+bool BleManager::PerformAction(uint16_t conn_handle, uint32_t uid, AncsActionId action) {
+    Link* link = FindLink(conn_handle);
+    if (link == nullptr) {
+        return false;
+    }
+    link->ancs.PerformAction(uid, action);
+    return true;
 }
 
 void BleManager::PrintConnection(uint16_t conn_handle) {
@@ -182,6 +226,7 @@ int BleManager::GapEventHandler(struct ble_gap_event* event, void* arg) {
 
 int BleManager::HandleGapEvent(struct ble_gap_event* event) {
     struct ble_gap_conn_desc desc;
+    Link* link;
     int rc;
 
     switch (event->type) {
@@ -194,12 +239,23 @@ int BleManager::HandleGapEvent(struct ble_gap_event* event) {
                 ScheduleAdvertising();
                 return 0;
             }
-            conn_handle_ = event->connect.conn_handle;
-            ble_npl_callout_stop(&advertise_retry_timer_);
-            ESP_LOGI(TAG, "Connected");
+            link = AllocateLink(event->connect.conn_handle);
+            if (link == nullptr) {
+                // NimBLE never accepts more than CONFIG_BT_NIMBLE_MAX_CONNECTIONS, so this should not happen
+                ESP_LOGE(TAG, "No free connection slot");
+                ble_gap_terminate(event->connect.conn_handle, BLE_ERR_CONN_LIMIT);
+                return 0;
+            }
+            ESP_LOGI(TAG, "Connected (%d/%d)", GetConnectionCount(), kMaxConnections);
             PrintConnection(event->connect.conn_handle);
             if (connection_callback_) {
-                connection_callback_(true);
+                connection_callback_(true, GetConnectionCount());
+            }
+            // Advertising stops when a connection is established; keep accepting more devices
+            if (GetConnectionCount() < kMaxConnections) {
+                ScheduleAdvertising();
+            } else {
+                ble_npl_callout_stop(&advertise_retry_timer_);
             }
 
             // Pair on first connection, or restore encryption with the stored bond.
@@ -212,11 +268,16 @@ int BleManager::HandleGapEvent(struct ble_gap_event* event) {
             return 0;
 
         case BLE_GAP_EVENT_DISCONNECT:
-            ESP_LOGI(TAG, "Disconnected, reason=0x%x", event->disconnect.reason);
-            conn_handle_ = BLE_HS_CONN_HANDLE_NONE;
-            ancs_client_.OnDisconnected();
-            if (connection_callback_) {
-                connection_callback_(false);
+            link = FindLink(event->disconnect.conn.conn_handle);
+            if (link != nullptr) {
+                link->ancs.OnDisconnected();
+                link->conn_handle = BLE_HS_CONN_HANDLE_NONE;
+            }
+            // No link means the connection failed before BLE_GAP_EVENT_CONNECT succeeded
+            ESP_LOGI(TAG, "Disconnected, conn=%d reason=0x%x (%d/%d)", event->disconnect.conn.conn_handle,
+                     event->disconnect.reason, GetConnectionCount(), kMaxConnections);
+            if (link != nullptr && connection_callback_) {
+                connection_callback_(false, GetConnectionCount());
             }
             ScheduleAdvertising();
             return 0;
@@ -243,7 +304,10 @@ int BleManager::HandleGapEvent(struct ble_gap_event* event) {
             }
             ESP_LOGI(TAG, "Link encrypted");
             PrintConnection(event->enc_change.conn_handle);
-            ancs_client_.OnEncrypted(event->enc_change.conn_handle);
+            link = FindLink(event->enc_change.conn_handle);
+            if (link != nullptr) {
+                link->ancs.OnEncrypted(event->enc_change.conn_handle);
+            }
             return 0;
 
         case BLE_GAP_EVENT_REPEAT_PAIRING:
@@ -269,7 +333,8 @@ int BleManager::HandleGapEvent(struct ble_gap_event* event) {
         }
 
         case BLE_GAP_EVENT_NOTIFY_RX:
-            if (!ancs_client_.OnNotifyRx(event->notify_rx.attr_handle, event->notify_rx.om)) {
+            link = FindLink(event->notify_rx.conn_handle);
+            if (link == nullptr || !link->ancs.OnNotifyRx(event->notify_rx.attr_handle, event->notify_rx.om)) {
                 ESP_LOGD(TAG, "Notification from unknown handle %u", event->notify_rx.attr_handle);
             }
             return 0;
@@ -296,8 +361,10 @@ void BleManager::OnClearBondsEvent(struct ble_npl_event* ev) {
     auto* self = static_cast<BleManager*>(ble_npl_event_get_arg(ev));
     int rc = ble_store_clear();
     ESP_LOGW(TAG, "All BLE bonds erased (rc=%d). Also choose \"Forget This Device\" on the iPhone", rc);
-    uint16_t conn_handle = self->conn_handle_;
-    if (conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-        ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    for (auto& link : self->links_) {
+        uint16_t conn_handle = link.conn_handle;
+        if (conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+            ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        }
     }
 }

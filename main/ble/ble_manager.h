@@ -5,6 +5,7 @@
 #include <nimble/nimble_npl.h>
 
 #include <string>
+#include <array>
 #include <atomic>
 #include <functional>
 
@@ -16,10 +17,15 @@
  * The ESP32 advertises as a peripheral and solicits the ANCS service, so the
  * iPhone lists it in Settings > Bluetooth. After the iPhone connects, the link
  * is bonded ("Just Works") and encrypted, then the AncsClient takes over.
+ *
+ * Up to CONFIG_BT_NIMBLE_MAX_CONNECTIONS devices (iPhone / iPad) can be
+ * connected at the same time, each with its own AncsClient. Advertising
+ * continues while a connection slot is free.
  */
 class BleManager {
 public:
-    using ConnectionCallback = std::function<void(bool connected)>;
+    using ConnectionCallback = std::function<void(bool connected, int connection_count)>;
+    static constexpr int kMaxConnections = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;
 
     static BleManager& GetInstance() {
         static BleManager instance;
@@ -29,13 +35,17 @@ public:
     BleManager& operator=(const BleManager&) = delete;
 
     void Initialize(const std::string& device_name);
-    AncsClient& GetAncsClient() { return ancs_client_; }
 
-    bool IsConnected() const { return conn_handle_ != BLE_HS_CONN_HANDLE_NONE; }
-    // Invoked from the NimBLE host task
+    int GetConnectionCount() const;
+    // Both callbacks are invoked from the NimBLE host task. Set them before Initialize().
     void SetConnectionCallback(ConnectionCallback callback) { connection_callback_ = std::move(callback); }
+    void SetNotificationCallback(AncsClient::NotificationCallback callback);
 
-    // Thread-safe: erase all bonds and drop the current connection
+    // Thread-safe: trigger a notification action on the device identified by
+    // AncsNotification::conn_handle. Returns false if that device is gone.
+    bool PerformAction(uint16_t conn_handle, uint32_t uid, AncsActionId action);
+
+    // Thread-safe: erase all bonds and drop all connections
     void ClearBonds();
 
 private:
@@ -46,6 +56,14 @@ private:
     int HandleGapEvent(struct ble_gap_event* event);
     void PrintConnection(uint16_t conn_handle);
 
+    // One connection slot: the connection handle and its ANCS client
+    struct Link {
+        std::atomic<uint16_t> conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        AncsClient ancs;
+    };
+    Link* FindLink(uint16_t conn_handle);
+    Link* AllocateLink(uint16_t conn_handle);
+
     static int GapEventHandler(struct ble_gap_event* event, void* arg);
     static void OnSync();
     static void OnReset(int reason);
@@ -54,11 +72,10 @@ private:
     static void OnAdvertiseEvent(struct ble_npl_event* ev);
     static void OnAdvertiseRetry(struct ble_npl_event* ev);
 
-    AncsClient ancs_client_;
+    std::array<Link, kMaxConnections> links_;
     ConnectionCallback connection_callback_;
     std::string device_name_;
     uint8_t own_addr_type_ = 0;
-    std::atomic<uint16_t> conn_handle_ = BLE_HS_CONN_HANDLE_NONE;
     struct ble_npl_event clear_bonds_event_;
     struct ble_npl_event advertise_event_;
     struct ble_npl_callout advertise_retry_timer_;

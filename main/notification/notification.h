@@ -16,6 +16,11 @@ struct AncsNotification {
     uint8_t category_count = 0;
     uint32_t uid = 0;
 
+    // Source device (one ESP32 can serve several iPhones / iPads)
+    uint16_t conn_handle = 0;
+    std::string peer_name;       // GAP device name, e.g. "John's iPhone"
+    std::string peer_address;    // Identity address, stable across reconnects
+
     bool has_attributes = false;
     std::string app_id;
     std::string app_name;

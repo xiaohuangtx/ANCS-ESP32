@@ -6,6 +6,7 @@
 
 - BLE 外设广播 ANCS Service Solicitation，iPhone「设置 > 蓝牙」中可直接看到并连接
 - Just Works 绑定配对（含 IRK，兼容 iPhone 随机地址），重启后自动重连
+- 最多 2 台设备（iPhone / iPad）同时连接，每条通知都带有来源设备的名称和地址
 - 完整 ANCS 客户端：服务发现 → 订阅 → 获取通知属性（App、标题、副标题、正文、时间、操作按钮）→ 查询 App 显示名称（带缓存）
 - Data Source 分包重组，Control Point 请求串行队列 + 超时
 - Wi-Fi：保存多个 SSID，无配置或连接超时自动开启配网热点
@@ -18,7 +19,7 @@
 ANCS-ESP32/
 ├── CMakeLists.txt
 ├── sdkconfig.defaults[.esp32|.esp32s3|.esp32c3|.esp32c6]
-├── partitions/            # 4m / 8m / 16m 分区表（双 OTA 分区，预留后续 OTA）
+├── partitions/            # 4m / 8m / 16m 分区表（双 OTA 分区，预留后续 OTA），默认 16m
 └── main/
     ├── main.cc            # NVS 初始化，启动 Application
     ├── application.cc/h   # 主事件循环、Schedule()、模块组装
@@ -50,8 +51,9 @@ idf.py -p /dev/cu.usbmodemXXXX flash monitor
 
 > 修改 `sdkconfig.defaults` 后需要删除 `sdkconfig` 或重新 `set-target` 才会生效。
 
-默认分区表为 4MB。16MB Flash 的板子可在 menuconfig 中把
-`Partition Table > Custom partition CSV file` 改为 `partitions/16m.csv`，并设置 `Serial flasher config > Flash size` 为 16MB。
+默认按 16MB Flash 配置（`partitions/16m.csv`：两个 4MB OTA 分区 + 8MB `storage`）。
+Flash 较小的板子可在 menuconfig 中把 `Partition Table > Custom partition CSV file` 改为
+`partitions/4m.csv` 或 `partitions/8m.csv`，并相应修改 `Serial flasher config > Flash size`。
 
 ## 使用
 
@@ -62,6 +64,7 @@ idf.py -p /dev/cu.usbmodemXXXX flash monitor
 
 ```
 ==================== ANCS Notification ====================
+Device   : 张三的iPhone (5c:52:84:aa:bb:cc)
 Event    : added (uid=12)
 Category : Social (count=1)
 Flags    : PositiveAction|NegativeAction
@@ -72,6 +75,11 @@ Message  : 晚上一起吃饭吗？
 Actions  : [] / [清除]
 ===========================================================
 ```
+
+### 多设备
+
+最多 2 台 iPhone / iPad 同时连接（`CONFIG_BT_NIMBLE_MAX_CONNECTIONS`），最多保存 4 台设备的配对（`CONFIG_BT_NIMBLE_MAX_BONDS`）。
+已有设备连接时 ESP32 会继续广播，第二台设备按同样步骤配对即可；两台都连上后停止广播，任意一台断开后恢复。
 
 ### 常见问题
 
@@ -91,6 +99,8 @@ URL 为空时 Webhook 关闭。配置来源（优先级从高到低）：
 ```json
 {
   "device": "aa:bb:cc:dd:ee:ff",
+  "peer_name": "张三的iPhone",
+  "peer_address": "5c:52:84:aa:bb:cc",
   "event": "added",
   "uid": 12,
   "category": "Social",
@@ -115,9 +125,10 @@ URL 为空时 Webhook 关闭。配置来源（优先级从高到低）：
 }
 ```
 
+`device` 是 ESP32 的 MAC；`peer_name` / `peer_address` 标识通知来自哪台 iPhone / iPad（地址为绑定后的身份地址，重连不变）。
 `event` 取值为 `added` / `modified` / `removed`。`removed` 事件只包含 `uid`、`category` 与 `flags`，因为 iOS 不再提供已删除通知的内容。返回 2xx 视为成功；网络错误或 5xx 最多重试 3 次；4xx 不重试。
 
 ## 扩展
 
-- 对通知执行操作（如拒接来电）：`BleManager::GetInstance().GetAncsClient().PerformAction(uid, kAncsActionNegative)`，可从任意任务调用。
+- 对通知执行操作（如拒接来电）：`BleManager::GetInstance().PerformAction(notification.conn_handle, notification.uid, kAncsActionNegative)`，可从任意任务调用。
 - 新增通知去向（MQTT、屏幕显示等）：在 `Application::OnNotification()` 中添加。

@@ -31,6 +31,7 @@ static std::string GetDeviceId() {
 
 void AncsNotification::Print() const {
     printf("\n==================== ANCS Notification ====================\n");
+    printf("Device   : %s (%s)\n", peer_name.c_str(), peer_address.c_str());
     printf("Event    : %s (uid=%lu)\n", AncsEventName(event_id), (unsigned long)uid);
     printf("Category : %s (count=%u)\n", AncsCategoryName(category_id), category_count);
     printf("Flags    : %s\n", FlagsToString(event_flags).c_str());
@@ -61,6 +62,8 @@ std::string AncsNotification::ToJson() const {
 
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "device", device_id.c_str());
+    cJSON_AddStringToObject(root, "peer_name", peer_name.c_str());
+    cJSON_AddStringToObject(root, "peer_address", peer_address.c_str());
     cJSON_AddStringToObject(root, "event", AncsEventName(event_id));
     cJSON_AddNumberToObject(root, "uid", uid);
     cJSON_AddStringToObject(root, "category", AncsCategoryName(category_id));
