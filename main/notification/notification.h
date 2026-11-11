@@ -5,9 +5,8 @@
 #include <string>
 
 /**
- * An iOS notification received through ANCS.
- * For "removed" events only the header fields (uid, category, flags) are valid,
- * because iOS no longer serves the attributes of a removed notification.
+ * An iOS notification received through ANCS ("added" / "modified" events;
+ * "removed" events are consumed internally and never emitted).
  */
 struct AncsNotification {
     uint8_t event_id = 0;        // AncsEventId
