@@ -286,6 +286,15 @@ int BleManager::HandleGapEvent(struct ble_gap_event* event) {
                 ble_npl_callout_stop(&advertise_retry_timer_);
             }
 
+            // A bonded iPhone may restore encryption before this event is reported (the
+            // ESP-IDF port delays it until the remote features are read), so the earlier
+            // BLE_GAP_EVENT_ENC_CHANGE found no link. Start ANCS now; initiating security
+            // again would only send a Security Request the iPhone ignores, and SMP times out.
+            if (ble_gap_conn_find(event->connect.conn_handle, &desc) == 0 && desc.sec_state.encrypted) {
+                link->ancs.OnEncrypted(event->connect.conn_handle);
+                return 0;
+            }
+
             // Pair on first connection, or restore encryption with the stored bond.
             // ANCS discovery starts after BLE_GAP_EVENT_ENC_CHANGE.
             rc = ble_gap_security_initiate(event->connect.conn_handle);
@@ -336,6 +345,7 @@ int BleManager::HandleGapEvent(struct ble_gap_event* event) {
             if (link != nullptr) {
                 link->ancs.OnEncrypted(event->enc_change.conn_handle);
             }
+            // Otherwise BLE_GAP_EVENT_CONNECT has not been reported yet and starts ANCS itself
             return 0;
 
         case BLE_GAP_EVENT_REPEAT_PAIRING:
