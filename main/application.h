@@ -16,9 +16,7 @@
 
 // Main event bits
 #define MAIN_EVENT_SCHEDULE             (1 << 0)
-#define MAIN_EVENT_NETWORK_CONNECTED    (1 << 1)
-#define MAIN_EVENT_NETWORK_DISCONNECTED (1 << 2)
-#define MAIN_EVENT_CLOCK_TICK           (1 << 3)
+#define MAIN_EVENT_CLOCK_TICK           (1 << 1)
 
 class Application {
 public:

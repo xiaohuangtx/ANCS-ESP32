@@ -62,15 +62,17 @@ void Application::Initialize() {
     // Wi-Fi: connect to a stored network, or open the provisioning hotspot
     auto& wifi = WifiService::GetInstance();
     wifi.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
-        // The admin page is started / stopped right here rather than in the main
-        // task: entering config mode emits Disconnected just before the hotspot
-        // starts its own server on port 80, so ours must be gone by then
+        // Handled right here rather than in the main task. Entering config mode
+        // emits Disconnected just before the hotspot starts its own server on
+        // port 80, so ours must be gone by then. And a quick disconnect +
+        // reconnect must reach the webhook in order, which two event bits
+        // handled together in the main loop would not guarantee.
         if (event == NetworkEvent::Connected) {
             WebServer::GetInstance().Start();
-            xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_CONNECTED);
+            WebhookClient::GetInstance().SetNetworkReady(true);
         } else if (event == NetworkEvent::Disconnected) {
             WebServer::GetInstance().Stop();
-            xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_DISCONNECTED);
+            WebhookClient::GetInstance().SetNetworkReady(false);
         }
     });
     wifi.Start(MakeDeviceName(CONFIG_WIFI_AP_SSID_PREFIX));
@@ -126,20 +128,10 @@ void Application::OnNotification(const AncsNotification& notification) {
 void Application::Run() {
     const EventBits_t ALL_EVENTS =
         MAIN_EVENT_SCHEDULE |
-        MAIN_EVENT_NETWORK_CONNECTED |
-        MAIN_EVENT_NETWORK_DISCONNECTED |
         MAIN_EVENT_CLOCK_TICK;
 
     while (true) {
         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
-
-        if (bits & MAIN_EVENT_NETWORK_CONNECTED) {
-            WebhookClient::GetInstance().SetNetworkReady(true);
-        }
-
-        if (bits & MAIN_EVENT_NETWORK_DISCONNECTED) {
-            WebhookClient::GetInstance().SetNetworkReady(false);
-        }
 
         if (bits & MAIN_EVENT_CLOCK_TICK) {
             PrintHeapStats();
