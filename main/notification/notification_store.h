@@ -46,6 +46,15 @@ public:
 
     bool IsEnabled() const { return partition_ != nullptr; }
 
+    struct Stats {
+        int sectors;       // In the ring
+        int used_sectors;
+        int head_sector;   // Written last, -1: none yet
+        int errors;        // Failed flash reads / writes / erases since boot
+        esp_err_t last_error;
+    };
+    Stats GetStats();
+
     // Returns the new record id (increasing across reboots), 0 on failure
     uint32_t Append(const AncsNotification& notification, UploadState state, time_t received_time);
     // Only a pending record can change state
@@ -83,6 +92,8 @@ private:
     uint32_t write_offset_ = 0;              // Within the head sector, 0: full
     uint32_t next_id_ = 1;
     std::map<uint32_t, uint32_t> pending_;   // id -> record offset
+    int errors_ = 0;
+    esp_err_t last_error_ = ESP_OK;
 };
 
 #endif // NOTIFICATION_STORE_H

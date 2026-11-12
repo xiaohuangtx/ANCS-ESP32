@@ -98,6 +98,7 @@ void Application::Initialize() {
     });
     ble.SetNotificationCallback([this](const AncsNotification& notification) {
         // Called from the NimBLE host task: hand over to the main task
+        notifications_received_++;
         Schedule([this, notification]() {
             OnNotification(notification);
         });
@@ -154,6 +155,7 @@ void Application::OnNotification(const AncsNotification& notification) {
     if (reported && (notification.event_flags & kAncsFlagPreExisting)) {
         ESP_LOGI(TAG, "Skipping pre-existing notification uid=%lu from %s, already reported",
                  (unsigned long)notification.uid, notification.peer_name.c_str());
+        notifications_skipped_++;
         return;
     }
     if (!reported) {
@@ -164,10 +166,14 @@ void Application::OnNotification(const AncsNotification& notification) {
     }
 
     notification.Print();
+    // Print() goes to the console only; leave a trace in the admin page log
+    ESP_LOGI(TAG, "Notification uid=%lu from %s, app %s", (unsigned long)notification.uid,
+             notification.peer_name.c_str(), notification.app_id.c_str());
     auto& webhook = WebhookClient::GetInstance();
     uint32_t id = NotificationHistory::GetInstance().Add(
         notification, webhook.IsEnabled() ? UploadState::kPending : UploadState::kSkipped);
     webhook.Post(id, notification.ToJson());
+    notifications_handled_++;
 }
 
 void Application::Run() {
@@ -181,11 +187,29 @@ void Application::Run() {
             std::unique_lock<std::mutex> lock(mutex_);
             auto tasks = std::move(main_tasks_);
             lock.unlock();
+            busy_since_us_ = esp_timer_get_time();
             for (auto& task : tasks) {
                 task();
             }
+            busy_since_us_ = 0;
         }
     }
+}
+
+Application::Diagnostics Application::GetDiagnostics() {
+    Diagnostics diagnostics = {};
+    diagnostics.notifications_received = notifications_received_;
+    diagnostics.notifications_handled = notifications_handled_;
+    diagnostics.notifications_skipped = notifications_skipped_;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        diagnostics.pending_tasks = main_tasks_.size();
+    }
+    int64_t busy_since = busy_since_us_;
+    if (busy_since != 0) {
+        diagnostics.busy_seconds = (esp_timer_get_time() - busy_since) / 1000000;
+    }
+    return diagnostics;
 }
 
 void Application::Schedule(std::function<void()>&& callback) {

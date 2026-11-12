@@ -47,6 +47,7 @@ private:
 
     static esp_err_t HandleIndex(httpd_req_t* req);
     static esp_err_t HandleStatus(httpd_req_t* req);
+    static esp_err_t HandleLogs(httpd_req_t* req);
     static esp_err_t HandleGetNotifications(httpd_req_t* req);
     static esp_err_t HandleClearNotifications(httpd_req_t* req);
     static esp_err_t HandleGetConfig(httpd_req_t* req);

@@ -15,6 +15,7 @@ set(SOURCES "ble/ble_manager.cc"
             "web/http_utils.cc"
             "application.cc"
             "settings.cc"
+            "log_buffer.cc"
             "main.cc"
             )
 

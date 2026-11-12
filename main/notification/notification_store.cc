@@ -195,6 +195,9 @@ NotificationStore::NotificationStore() {
         ESP_LOGW(TAG, "Partition \"%s\" is too small", kPartitionLabel);
         return;
     }
+    ESP_LOGI(TAG, "Partition \"%s\" at 0x%lx, %lu KB, subtype 0x%02x, using %d KB", kPartitionLabel,
+             (unsigned long)partition->address, (unsigned long)(partition->size / 1024), partition->subtype,
+             (int)(sector_count_ * kSectorSize / 1024));
     partition_ = partition;
     sector_sequence_.assign(sector_count_, 0);
     buffer_.resize(kSectorSize);
@@ -204,7 +207,10 @@ NotificationStore::NotificationStore() {
 void NotificationStore::Scan() {
     for (int sector = 0; sector < sector_count_; sector++) {
         SectorHeader header;
-        if (esp_partition_read(partition_, sector * kSectorSize, &header, sizeof(header)) != ESP_OK) {
+        esp_err_t err = esp_partition_read(partition_, sector * kSectorSize, &header, sizeof(header));
+        if (err != ESP_OK) {
+            errors_++;
+            last_error_ = err;
             continue;
         }
         if (header.magic != kSectorMagic || header.sequence == 0 ||
@@ -249,8 +255,11 @@ void NotificationStore::Scan() {
 bool NotificationStore::ReadSector(int sector, std::vector<Record>* records, uint32_t* end, bool parse) {
     *end = 0;
     uint32_t base = sector * kSectorSize;
-    if (esp_partition_read(partition_, base, buffer_.data(), kSectorSize) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read sector %d", sector);
+    esp_err_t err = esp_partition_read(partition_, base, buffer_.data(), kSectorSize);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read sector %d: %s", sector, esp_err_to_name(err));
+        errors_++;
+        last_error_ = err;
         return false;
     }
     uint32_t pos = sizeof(SectorHeader);
@@ -299,6 +308,8 @@ bool NotificationStore::OpenNextSector() {
     esp_err_t err = esp_partition_erase_range(partition_, begin, kSectorSize);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to erase sector %d: %s", next, esp_err_to_name(err));
+        errors_++;
+        last_error_ = err;
         return false;
     }
     SectorHeader header = {kSectorMagic, sequence_ + 1, 0xFFFFFFFF, 0};
@@ -306,6 +317,8 @@ bool NotificationStore::OpenNextSector() {
     err = esp_partition_write(partition_, begin, &header, sizeof(header));
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to write sector %d: %s", next, esp_err_to_name(err));
+        errors_++;
+        last_error_ = err;
         return false;
     }
     sequence_ = header.sequence;
@@ -349,6 +362,8 @@ uint32_t NotificationStore::Append(const AncsNotification& notification, UploadS
     esp_err_t err = esp_partition_write(partition_, offset, data.data(), data.size());
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to write notification: %s", esp_err_to_name(err));
+        errors_++;
+        last_error_ = err;
         write_offset_ = 0;  // The rest of this sector is suspect
         return 0;
     }
@@ -372,6 +387,8 @@ void NotificationStore::SetUploadState(uint32_t id, UploadState state) {
     esp_err_t err = esp_partition_write(partition_, it->second + offsetof(RecordHeader, upload_state), &value, 1);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to update notification %lu: %s", (unsigned long)id, esp_err_to_name(err));
+        errors_++;
+        last_error_ = err;
     }
     pending_.erase(it);
 }
@@ -404,6 +421,15 @@ void NotificationStore::ForEach(const std::function<bool(const StoredNotificatio
     }
 }
 
+NotificationStore::Stats NotificationStore::GetStats() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stats stats = {sector_count_, 0, head_, errors_, last_error_};
+    for (uint32_t sequence : sector_sequence_) {
+        stats.used_sectors += sequence != 0;
+    }
+    return stats;
+}
+
 std::vector<uint32_t> NotificationStore::GetPendingIds() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<uint32_t> ids;
@@ -421,7 +447,10 @@ bool NotificationStore::ReadPending(uint32_t id, StoredNotification* record) {
     }
     // Records never span sectors: read up to the end of this one
     uint32_t available = kSectorSize - it->second % kSectorSize;
-    if (esp_partition_read(partition_, it->second, buffer_.data(), available) != ESP_OK) {
+    esp_err_t err = esp_partition_read(partition_, it->second, buffer_.data(), available);
+    if (err != ESP_OK) {
+        errors_++;
+        last_error_ = err;
         return false;
     }
     bool valid;

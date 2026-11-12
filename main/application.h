@@ -5,6 +5,7 @@
 #include <freertos/event_groups.h>
 #include <freertos/task.h>
 
+#include <atomic>
 #include <mutex>
 #include <deque>
 #include <memory>
@@ -43,6 +44,16 @@ public:
      */
     void Schedule(std::function<void()>&& callback);
 
+    // For the admin page: where notifications get stuck, if anywhere
+    struct Diagnostics {
+        uint32_t notifications_received;  // From BLE
+        uint32_t notifications_handled;   // Recorded and sent to the webhook
+        uint32_t notifications_skipped;   // Replays already reported
+        int pending_tasks;                // Waiting for the main task
+        int busy_seconds;                 // Time the main task spent on the current task batch, 0 when idle
+    };
+    Diagnostics GetDiagnostics();
+
 private:
     Application();
     ~Application();
@@ -54,6 +65,10 @@ private:
 
     std::mutex mutex_;
     std::deque<std::function<void()>> main_tasks_;
+    std::atomic<uint32_t> notifications_received_ = 0;
+    std::atomic<uint32_t> notifications_handled_ = 0;
+    std::atomic<uint32_t> notifications_skipped_ = 0;
+    std::atomic<int64_t> busy_since_us_ = 0;  // 0 when idle
     EventGroupHandle_t event_group_ = nullptr;
     std::unique_ptr<Button> boot_button_;
     // Fingerprints of the notifications reported so far, oldest first, also

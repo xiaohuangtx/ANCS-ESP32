@@ -23,6 +23,9 @@ section.active { display:block; }
 .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px 24px; }
 .kv .k { color:var(--muted); font-size:12px; }
 .kv .v { font-size:15px; word-break:break-all; }
+.kv .v.bad { color:var(--danger); } .kv .v.good { color:#1a8a3a; }
+.group + .group { margin-top:16px; padding-top:14px; border-top:1px solid var(--line); }
+.group h3 { margin:0 0 10px; font-size:13px; font-weight:600; color:var(--muted); }
 label { display:block; margin:12px 0 4px; color:var(--muted); font-size:13px; }
 input[type=text],input[type=password],input[type=number],input[type=url] { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; font-size:14px; }
 input:focus { outline:none; border-color:var(--primary); }
@@ -37,6 +40,8 @@ button:disabled { opacity:.5; cursor:not-allowed; }
 .badge { display:inline-block; padding:0 8px; border-radius:10px; font-size:12px; background:#eef3ff; color:var(--primary); }
 .badge.gray { background:#f0f1f5; color:var(--muted); }
 .badge.red { background:#fff0f0; color:var(--danger); }
+.log { margin:0; max-height:420px; overflow:auto; padding:10px; background:#f6f7fa; border-radius:6px; font:12px/1.5 ui-monospace,Menlo,Consolas,monospace; white-space:pre-wrap; word-break:break-all; user-select:text; }
+.log .E { color:var(--danger); } .log .W { color:#c76a00; } .log .I { color:#1a8a3a; } .log .D, .log .V { color:var(--muted); }
 .notif { border-top:1px solid var(--line); padding:12px 8px; margin:0 -8px; cursor:pointer; border-radius:6px; }
 .notif:first-of-type { border-top:none; }
 .notif:hover { background:#f7f8fa; }
@@ -166,6 +171,15 @@ button:disabled { opacity:.5; cursor:not-allowed; }
 
 <section id="system">
   <div class="card">
+    <h2>诊断 <span id="dstate"></span><span class="spacer"></span><button id="drefresh">刷新</button></h2>
+    <div id="diag"></div>
+  </div>
+  <div class="card">
+    <h2>运行日志<span class="spacer"></span><button id="lrefresh">刷新</button><button id="ldownload">下载</button></h2>
+    <pre class="log" id="logs"></pre>
+    <div class="hint">设备上最近的日志（保存在内存中，重启后清空），排查问题时不用接串口。</div>
+  </div>
+  <div class="card">
     <h2>系统操作</h2>
     <div class="actions">
       <button id="reboot">重启设备</button>
@@ -221,10 +235,12 @@ function switchTab(name) {
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.tab === name));
   document.querySelectorAll('section').forEach(s => s.classList.toggle('active', s.id === name));
   clearInterval(timer);
-  const refresh = { overview: loadStatus, notifications: loadNotifications, ota: loadStatus }[name];
+  const refresh = { overview: loadStatus, notifications: loadNotifications, ota: loadStatus,
+                    system: () => { loadDiag(); loadLogs(); } }[name];
+  if (name === 'system') followLog = true;
   if (name === 'settings') loadConfig();
   if (name === 'wifi') loadWifi();
-  if (refresh) { refresh(); timer = setInterval(refresh, name === 'notifications' ? 5000 : 10000); }
+  if (refresh) { refresh(); timer = setInterval(refresh, { notifications: 5000, system: 3000 }[name] || 10000); }
 }
 document.querySelectorAll('nav a').forEach(a => a.onclick = () => switchTab(a.dataset.tab));
 
@@ -244,6 +260,89 @@ async function loadStatus() {
   $('otainfo').innerHTML = kv([['当前版本', s.version], ['当前分区', s.ota.running], ['写入分区', s.ota.next || '无'],
     ['最大固件大小', kb(s.ota.max_size)]]);
 }
+
+const RESET = { power_on:'上电', software:'软件重启', panic:'崩溃', interrupt_watchdog:'中断看门狗', task_watchdog:'任务看门狗',
+  watchdog:'看门狗', brownout:'电压过低', deep_sleep:'深度睡眠唤醒', external:'外部复位', other:'其他' };
+function usedPercent(used, total) {
+  const p = used * 100 / total;
+  return used && p < 1 ? '<1%' : Math.round(p) + '%';
+}
+async function loadDiag() {
+  let s;
+  try { s = await api('/api/status'); } catch (e) { return; }
+  const d = s.diag;
+  // [label, value, 'bad' | 'good' | undefined]
+  const group = (title, rows) => `<div class="group"><h3>${title}</h3><div class="grid">${rows.map(([k, v, cls]) =>
+    `<div class="kv"><div class="k">${k}</div><div class="v${cls ? ' ' + cls : ''}">${esc(v)}</div></div>`).join('')}</div></div>`;
+
+  const crashed = ['panic', 'interrupt_watchdog', 'task_watchdog', 'watchdog', 'brownout'].includes(d.reset_reason);
+  const stuck = d.busy_seconds >= 5;
+  const problems = [crashed && '上次异常重启', stuck && '主任务疑似卡住', d.store_errors > 0 && 'Flash 读写出错'].filter(Boolean);
+  $('dstate').innerHTML = problems.length ? problems.map(p => `<span class="badge red">${p}</span>`).join(' ')
+                                          : '<span class="badge">正常</span>';
+
+  const store = d.store_enabled
+    ? [['状态', '已启用'], ['已用扇区', `${d.store_used_sectors} / ${d.store_sectors}（${usedPercent(d.store_used_sectors, d.store_sectors)}）`],
+       ['读写错误', d.store_errors ? `${d.store_errors} 次，最近 ${d.store_last_error}` : '无', d.store_errors ? 'bad' : '']]
+    : [['状态', '未启用（无 storage 分区，只存内存）']];
+  $('diag').innerHTML =
+    group('系统', [['上次重启原因', RESET[d.reset_reason] || d.reset_reason, crashed ? 'bad' : ''], ['运行时间', duration(s.uptime)]]) +
+    group('通知处理', [['蓝牙收到', d.notifications_received], ['已处理', d.notifications_handled],
+      ['跳过（已上报过）', d.notifications_skipped],
+      ['主任务', d.busy_seconds ? `忙碌 ${d.busy_seconds} 秒` : '空闲', stuck ? 'bad' : 'good'],
+      ['等待处理', d.pending_tasks, d.pending_tasks > 0 && stuck ? 'bad' : '']]) +
+    group('Flash 存储', store);
+}
+let logText = '', logLoading = false;
+// Position in the device log, so each refresh only fetches what is new
+let logBoot = '', logNext = 0;
+const LOG_KEEP = 65536;  // Characters kept on the page
+// Keep showing the newest lines, unless scrolled up to read older ones
+let followLog = true;
+$('logs').onscroll = () => {
+  const el = $('logs');
+  followLog = el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
+};
+async function loadLogs() {
+  if (logLoading) return;  // A slow response is still on its way
+  logLoading = true;
+  let text, reset;
+  try {
+    const r = await fetch(`/api/logs?boot=${logBoot}&since=${logNext}`, { cache:'no-store' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    text = await r.text();
+    // Everything from the oldest line when rebooted or when we fell behind
+    reset = r.headers.get('X-Log-Reset') === '1';
+    logBoot = r.headers.get('X-Log-Boot') || '';
+    logNext = r.headers.get('X-Log-Next') || 0;
+  } catch (e) {
+    if (!logText) $('logs').textContent = '读取日志失败：' + e.message;
+    return;
+  } finally {
+    logLoading = false;
+  }
+  if (!reset && !text && logText) return;  // Nothing new: keep the page (and any selection) as it is
+  logText = reset ? text : logText + text;
+  if (logText.length > LOG_KEEP) {
+    const cut = logText.indexOf('\n', logText.length - LOG_KEEP);
+    logText = logText.slice(cut < 0 ? logText.length - LOG_KEEP : cut + 1);
+  }
+  const el = $('logs');
+  // Same colors as idf.py monitor: by the level letter of "E (1234) tag: ..."
+  el.innerHTML = logText ? logText.split('\n').map(line => {
+    const m = /^([EWIDV]) \(\d+\)/.exec(line);
+    return m ? `<span class="${m[1]}">${esc(line)}</span>` : esc(line);
+  }).join('\n') : '（暂无日志）';
+  if (followLog) el.scrollTop = el.scrollHeight;
+}
+$('drefresh').onclick = loadDiag;
+$('lrefresh').onclick = loadLogs;
+$('ldownload').onclick = () => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([logText], { type:'text/plain' }));
+  a.download = ($('devname').textContent || 'ancs') + '-log.txt';
+  a.click(); URL.revokeObjectURL(a.href);
+};
 
 async function loadNotifications() {
   let data;
@@ -458,7 +557,7 @@ $('fw').onchange = () => {
 $('upload').onclick = () => {
   if (!fwFile || !confirm(`确定使用 ${fwFile.name} 升级固件？`)) return;
   clearInterval(timer);
-  const oldVersion = status && status.version;
+  const oldVersion = status && status.version, oldPartition = status && status.ota.running;
   const bar = $('prog'), fill = bar.firstElementChild;
   bar.style.display = 'block'; fill.style.width = '0';
   $('upload').disabled = true; $('fw').disabled = true;
@@ -477,18 +576,23 @@ $('upload').onclick = () => {
     try { r = JSON.parse(xhr.responseText); } catch (e) {}
     if (xhr.status !== 200) return fail('升级失败：' + (r.error || 'HTTP ' + xhr.status));
     show('otamsg', '升级成功，设备正在重启…', true);
-    waitForReboot(oldVersion);
+    waitForReboot(oldVersion, oldPartition);
   };
   xhr.onerror = () => fail('上传失败，连接中断');
   xhr.send(fwFile);
 };
-function waitForReboot(oldVersion) {
+function waitForReboot(oldVersion, oldPartition) {
   const start = Date.now();
   const poll = async () => {
     try {
       const s = await api('/api/status');
       if (s.uptime < (Date.now() - start) / 1000 + 5) {
-        show('otamsg', `设备已重启，当前版本 v${s.version}` + (oldVersion && s.version === oldVersion ? '（版本号未变化）' : ''), true);
+        // The bootloader goes back to the old partition when the new firmware fails to start
+        if (oldPartition && s.ota.running === oldPartition) {
+          show('otamsg', `新固件启动失败，已回滚到原来的固件（v${s.version}，${s.build_time}）`);
+        } else {
+          show('otamsg', `升级完成，当前版本 v${s.version}，编译时间 ${s.build_time}` + (oldVersion && s.version === oldVersion ? '（版本号未变化）' : ''), true);
+        }
         $('fw').disabled = false;
         return loadStatus();
       }

@@ -4,6 +4,8 @@
 #include "wifi_service.h"
 #include "webhook_client.h"
 #include "notification_history.h"
+#include "notification_store.h"
+#include "log_buffer.h"
 #include "settings.h"
 #include "http_utils.h"
 
@@ -23,6 +25,21 @@
 
 extern const char admin_html_start[] asm("_binary_admin_html_start");
 extern const char admin_html_end[] asm("_binary_admin_html_end");
+
+static const char* ResetReasonName(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_POWERON: return "power_on";
+        case ESP_RST_SW: return "software";
+        case ESP_RST_PANIC: return "panic";
+        case ESP_RST_INT_WDT: return "interrupt_watchdog";
+        case ESP_RST_TASK_WDT: return "task_watchdog";
+        case ESP_RST_WDT: return "watchdog";
+        case ESP_RST_BROWNOUT: return "brownout";
+        case ESP_RST_DEEPSLEEP: return "deep_sleep";
+        case ESP_RST_EXT: return "external";
+        default: return "other";
+    }
+}
 
 static constexpr size_t kOtaBufferSize = 4096;
 // Image header + first segment header + app descriptor, enough to identify the image
@@ -115,6 +132,7 @@ void WebServer::Start() {
     const httpd_uri_t uris[] = {
         {"/", HTTP_GET, HandleIndex, this},
         {"/api/status", HTTP_GET, HandleStatus, this},
+        {"/api/logs", HTTP_GET, HandleLogs, this},
         {"/api/notifications", HTTP_GET, HandleGetNotifications, this},
         {"/api/notifications", HTTP_DELETE, HandleClearNotifications, this},
         {"/api/config", HTTP_GET, HandleGetConfig, this},
@@ -253,7 +271,52 @@ esp_err_t WebServer::HandleStatus(httpd_req_t* req) {
     cJSON_AddNumberToObject(json, "notification_count", history.GetCount());
     cJSON_AddNumberToObject(json, "history_size", history.GetCapacity());
     cJSON_AddBoolToObject(json, "webhook_enabled", WebhookClient::GetInstance().IsEnabled());
+
+    cJSON* diag_json = cJSON_AddObjectToObject(json, "diag");
+    cJSON_AddStringToObject(diag_json, "reset_reason", ResetReasonName(esp_reset_reason()));
+    auto diag = Application::GetInstance().GetDiagnostics();
+    cJSON_AddNumberToObject(diag_json, "notifications_received", diag.notifications_received);
+    cJSON_AddNumberToObject(diag_json, "notifications_handled", diag.notifications_handled);
+    cJSON_AddNumberToObject(diag_json, "notifications_skipped", diag.notifications_skipped);
+    cJSON_AddNumberToObject(diag_json, "pending_tasks", diag.pending_tasks);
+    cJSON_AddNumberToObject(diag_json, "busy_seconds", diag.busy_seconds);
+    auto& store = NotificationStore::GetInstance();
+    cJSON_AddBoolToObject(diag_json, "store_enabled", store.IsEnabled());
+    if (store.IsEnabled()) {
+        auto stats = store.GetStats();
+        cJSON_AddNumberToObject(diag_json, "store_sectors", stats.sectors);
+        cJSON_AddNumberToObject(diag_json, "store_used_sectors", stats.used_sectors);
+        cJSON_AddNumberToObject(diag_json, "store_errors", stats.errors);
+        cJSON_AddStringToObject(diag_json, "store_last_error", esp_err_to_name(stats.last_error));
+    }
     return SendJson(req, json);
+}
+
+esp_err_t WebServer::HandleLogs(httpd_req_t* req) {
+    if (!Self(req)->CheckAuth(req)) {
+        return ESP_OK;
+    }
+    // ?boot=<X-Log-Boot>&since=<X-Log-Next> from the previous response
+    auto& logs = LogBuffer::GetInstance();
+    uint64_t since = 0;
+    char query[64];
+    char value[24];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "boot", value, sizeof(value)) == ESP_OK &&
+        strtoul(value, nullptr, 10) == logs.GetBootId() &&
+        httpd_query_key_value(query, "since", value, sizeof(value)) == ESP_OK) {
+        since = strtoull(value, nullptr, 10);
+    }
+    auto result = logs.Read(since);
+    // The header values must live until the response is sent
+    std::string boot = std::to_string(logs.GetBootId());
+    std::string next = std::to_string(result.next);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-Log-Boot", boot.c_str());
+    httpd_resp_set_hdr(req, "X-Log-Next", next.c_str());
+    httpd_resp_set_hdr(req, "X-Log-Reset", since == 0 || result.reset ? "1" : "0");
+    return httpd_resp_send(req, result.text.data(), result.text.size());
 }
 
 esp_err_t WebServer::HandleGetNotifications(httpd_req_t* req) {
