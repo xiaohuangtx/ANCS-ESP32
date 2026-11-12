@@ -155,7 +155,7 @@ URL 为空时 Webhook 关闭。配置来源（优先级从高到低）：
 
 `device` 是 ESP32 的 MAC；`peer_name` / `peer_address` 标识通知来自哪台 iPhone / iPad（地址为绑定后的身份地址，重连不变）。
 `event` 取值为 `added` / `modified`；管理后台发送的测试通知为 `test`。
-`message` 最多 `CONFIG_ANCS_MAX_MESSAGE_LEN`（默认 512）字节，更长的内容 iOS 不会发送，此时 `message_truncated` 为 `true`、`message_size` 为原始长度。返回 2xx 视为成功；网络错误或 5xx 最多重试 3 次；4xx 不重试。
+`message` 最多 `CONFIG_ANCS_MAX_MESSAGE_LEN`（默认 512）字节，更长的内容 iOS 不会发送，此时 `message_truncated` 为 `true`、`message_size` 为原始长度。返回 2xx 视为成功；网络错误或 5xx 最多重试 3 次；4xx 不重试。重试期间 Wi-Fi 断开时会等待重新连上再发送，这种失败不计入重试次数。
 
 ## 扩展
 

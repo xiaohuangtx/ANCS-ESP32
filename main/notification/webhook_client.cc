@@ -116,18 +116,23 @@ void WebhookClient::Run() {
             continue;
         }
 
-        // Hold the payload until Wi-Fi is up
-        xEventGroupWaitBits(event_group_, WEBHOOK_EVENT_NETWORK_READY, pdFALSE, pdTRUE, portMAX_DELAY);
-
-        for (int attempt = 1; attempt <= kMaxAttempts; attempt++) {
+        int attempt = 1;
+        while (true) {
+            // Hold the payload until Wi-Fi is up, also between retries
+            xEventGroupWaitBits(event_group_, WEBHOOK_EVENT_NETWORK_READY, pdFALSE, pdTRUE, portMAX_DELAY);
             if (Send(*item)) {
                 break;
             }
+            if (!(xEventGroupGetBits(event_group_) & WEBHOOK_EVENT_NETWORK_READY)) {
+                ESP_LOGW(TAG, "Wi-Fi lost, sending again once it is back");
+                continue;  // Not the server's fault, does not count as an attempt
+            }
             if (attempt == kMaxAttempts) {
                 ESP_LOGE(TAG, "Giving up after %d attempts", kMaxAttempts);
-            } else {
-                vTaskDelay(pdMS_TO_TICKS(1000 * attempt));
+                break;
             }
+            vTaskDelay(pdMS_TO_TICKS(1000 * attempt));
+            attempt++;
         }
         delete item;
     }
