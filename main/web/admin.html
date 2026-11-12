@@ -575,6 +575,8 @@ $('upload').onclick = () => {
     let r = {};
     try { r = JSON.parse(xhr.responseText); } catch (e) {}
     if (xhr.status !== 200) return fail('升级失败：' + (r.error || 'HTTP ' + xhr.status));
+    // A proxy in between (e.g. frp) may answer 200 by itself without the request reaching the device
+    if (r.success !== true) return fail('升级失败：设备没有返回升级结果，请求可能被中间的代理拦截');
     show('otamsg', '升级成功，设备正在重启…', true);
     waitForReboot(oldVersion, oldPartition);
   };
