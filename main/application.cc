@@ -4,16 +4,35 @@
 #include "webhook_client.h"
 #include "notification_history.h"
 #include "web_server.h"
+#include "ancs_defs.h"
 
 #include <esp_log.h>
 #include <esp_app_desc.h>
 #include <esp_heap_caps.h>
 #include <esp_mac.h>
 
+#include <algorithm>
+
 #define TAG "Application"
 
 // Heap statistics interval
 static constexpr int kClockTickSeconds = 60;
+// Notifications remembered to recognize them when iOS replays them
+static constexpr size_t kMaxReportedNotifications = 256;
+
+// Identifies a notification across reconnections: the uid alone could repeat
+// after the iPhone restarts, so the content is part of it
+static size_t Fingerprint(const AncsNotification& notification) {
+    std::string key = notification.peer_address;
+    for (auto* field : {&notification.app_id, &notification.date, &notification.title,
+                        &notification.subtitle, &notification.message}) {
+        key += '\0';
+        key += *field;
+    }
+    key += '\0';
+    key += std::to_string(notification.uid);
+    return std::hash<std::string>{}(key);
+}
 
 // "<prefix>-XXXXXX" with the last 3 bytes of the base MAC, so the BLE name and
 // the provisioning hotspot SSID are the same
@@ -120,6 +139,24 @@ void Application::InitializeButtons() {
 }
 
 void Application::OnNotification(const AncsNotification& notification) {
+    // iOS replays Notification Center, flagged PreExisting, on every connection.
+    // Drop the ones already reported over an earlier connection; pre-existing
+    // ones not seen yet (e.g. received while disconnected) are still reported.
+    size_t fingerprint = Fingerprint(notification);
+    bool reported = std::find(reported_notifications_.begin(), reported_notifications_.end(), fingerprint) !=
+                    reported_notifications_.end();
+    if (reported && (notification.event_flags & kAncsFlagPreExisting)) {
+        ESP_LOGI(TAG, "Skipping pre-existing notification uid=%lu from %s, already reported",
+                 (unsigned long)notification.uid, notification.peer_name.c_str());
+        return;
+    }
+    if (!reported) {
+        reported_notifications_.push_back(fingerprint);
+        if (reported_notifications_.size() > kMaxReportedNotifications) {
+            reported_notifications_.pop_front();
+        }
+    }
+
     notification.Print();
     NotificationHistory::GetInstance().Add(notification);
     WebhookClient::GetInstance().Post(notification.ToJson());

@@ -112,7 +112,7 @@ Actions  : [] / [清除]
 
 - **日志提示 `ANCS service not found`**：iPhone 上没有开启「共享系统通知」，开启后会自动重试。
 - **日志提示 `pairing keys do not match`**：ESP32 的绑定信息被清除（例如擦除了 Flash 或三击了 BOOT 键），但 iPhone 还保留着旧的配对。请在 iPhone 上「忽略此设备」后重新配对。
-- 订阅成功后 iOS 会把通知中心里已有的通知全部重发一次（`PreExisting` 标记）。如果不需要，可在 menuconfig 中开启 `Ignore pre-existing notifications`。
+- 订阅成功后 iOS 会把通知中心里已有的通知全部重发一次（`PreExisting` 标记）。iPhone 断开重连时，已经上报过的通知会被识别并跳过（在内存中记住最近 256 条，ESP32 重启后清空），不会重复写入通知记录或发送 Webhook；断线期间新收到的通知仍会上报。如果完全不需要已有通知，可在 menuconfig 中开启 `Ignore pre-existing notifications`。
 
 ## Webhook
 
