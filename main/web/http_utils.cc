@@ -1,5 +1,8 @@
 #include "http_utils.h"
 
+#include <cstring>
+#include <strings.h>
+
 static constexpr size_t kMaxBodySize = 4096;
 static constexpr int kMaxRecvTimeouts = 3;
 
@@ -35,6 +38,15 @@ const char* GetJsonString(cJSON* json, const char* key) {
     return cJSON_IsString(item) ? item->valuestring : nullptr;
 }
 
+bool HasContentType(httpd_req_t* req, const char* type) {
+    char value[64];
+    if (httpd_req_get_hdr_value_str(req, "Content-Type", value, sizeof(value)) != ESP_OK) {
+        return false;
+    }
+    size_t length = strlen(type);
+    return strncasecmp(value, type, length) == 0 && (value[length] == '\0' || value[length] == ';');
+}
+
 bool RecvExact(httpd_req_t* req, char* buffer, size_t length) {
     size_t offset = 0;
     int timeouts = 0;
@@ -52,7 +64,7 @@ bool RecvExact(httpd_req_t* req, char* buffer, size_t length) {
 }
 
 cJSON* ReadJsonBody(httpd_req_t* req) {
-    if (req->content_len == 0 || req->content_len > kMaxBodySize) {
+    if (req->content_len == 0 || req->content_len > kMaxBodySize || !HasContentType(req, "application/json")) {
         return nullptr;
     }
     std::string body(req->content_len, '\0');

@@ -15,6 +15,11 @@
  * back to CONFIG_WEB_ADMIN_PASSWORD), every request needs HTTP Basic auth
  * with user "admin".
  *
+ * Requests must address the device by IP or hostname (against DNS rebinding),
+ * and requests that change something must not come from another site (CSRF):
+ * a page on the internet could otherwise redirect the webhook or flash firmware
+ * through the browser of anyone on the LAN.
+ *
  * The provisioning hotspot runs its own server (ConfigPortal) on the same
  * port, so this one must be stopped before entering Wi-Fi config mode.
  */
@@ -34,7 +39,9 @@ public:
 private:
     WebServer() = default;
 
-    bool CheckAuth(httpd_req_t* req);
+    // Host / Origin checks, then the password. Sends the error response and
+    // returns false if the request must not be handled.
+    bool CheckRequest(httpd_req_t* req);
     void SetPassword(const std::string& password);
     bool HasPassword();
     bool ReceiveFirmware(httpd_req_t* req, std::string& error);
