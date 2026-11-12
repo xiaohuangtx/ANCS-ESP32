@@ -4,6 +4,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/event_groups.h>
+#include <esp_http_client.h>
 
 #include <string>
 #include <mutex>
@@ -15,6 +16,11 @@
  * keys "url" / "auth"), falling back to CONFIG_WEBHOOK_URL / CONFIG_WEBHOOK_AUTH_TOKEN.
  * An empty URL disables the webhook. Requests are sent from a dedicated task,
  * queued while Wi-Fi is down, and retried a few times on failure.
+ *
+ * The task keeps its HTTP(S) connection open between requests (keep-alive),
+ * so a burst of notifications costs one TLS handshake instead of one each. The
+ * connection is closed after kIdleCloseMs without requests to free the TLS
+ * memory, and when the URL changes or Wi-Fi goes down.
  */
 class WebhookClient {
 public:
@@ -48,14 +54,27 @@ private:
     WebhookClient() = default;
 
     void Run();
-    // Returns true when done (2xx, or a 4xx that will not succeed on retry)
-    bool Send(const std::string& body, int* status_code = nullptr);
+    // Sends over the task's kept-alive connection. Returns true when done
+    // (2xx, or a 4xx that will not succeed on retry).
+    bool Send(const std::string& body);
+    void CloseConnection();
+
+    static esp_http_client_handle_t CreateClient(const std::string& url);
+    // ESP_OK once the server answered, *status_code is set then. On an error
+    // the connection is closed, so the next request starts over cleanly.
+    static esp_err_t Perform(esp_http_client_handle_t client, const std::string& body,
+                             const std::string& auth_token, int* status_code);
+    static bool IsDone(esp_err_t err, int status_code);
 
     std::mutex mutex_;
     std::string url_;
     std::string auth_token_;
     QueueHandle_t queue_ = nullptr;
     EventGroupHandle_t event_group_ = nullptr;
+
+    // Only used by the webhook task
+    esp_http_client_handle_t client_ = nullptr;
+    std::string client_url_;
 };
 
 #endif // WEBHOOK_CLIENT_H

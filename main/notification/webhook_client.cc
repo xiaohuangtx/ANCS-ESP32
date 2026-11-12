@@ -13,6 +13,8 @@
 
 static constexpr int kMaxAttempts = 3;
 static constexpr int kTaskStackSize = 6144;
+// A kept-alive connection is closed after this long without requests
+static constexpr int kIdleCloseMs = 30000;
 
 void WebhookClient::Start() {
     {
@@ -104,22 +106,45 @@ int WebhookClient::SendTest() {
     cJSON_free(str);
     cJSON_Delete(root);
 
+    std::string url;
+    std::string auth_token;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        url = url_;
+        auth_token = auth_token_;
+    }
+    if (url.empty()) {
+        return -1;
+    }
+    // A connection of its own: this runs in the HTTP server task, and the
+    // webhook task's connection may be busy or still point to an old URL
+    esp_http_client_handle_t client = CreateClient(url);
+    if (client == nullptr) {
+        return -1;
+    }
     int status = -1;
-    Send(body, &status);
-    return status;
+    esp_err_t err = Perform(client, body, auth_token, &status);
+    IsDone(err, status);
+    esp_http_client_cleanup(client);
+    return err == ESP_OK ? status : -1;
 }
 
 void WebhookClient::Run() {
     while (true) {
         std::string* item = nullptr;
-        if (xQueueReceive(queue_, &item, portMAX_DELAY) != pdTRUE) {
+        TickType_t wait = client_ != nullptr ? pdMS_TO_TICKS(kIdleCloseMs) : portMAX_DELAY;
+        if (xQueueReceive(queue_, &item, wait) != pdTRUE) {
+            CloseConnection();  // Idle
             continue;
         }
 
         int attempt = 1;
         while (true) {
             // Hold the payload until Wi-Fi is up, also between retries
-            xEventGroupWaitBits(event_group_, WEBHOOK_EVENT_NETWORK_READY, pdFALSE, pdTRUE, portMAX_DELAY);
+            if (!(xEventGroupGetBits(event_group_) & WEBHOOK_EVENT_NETWORK_READY)) {
+                CloseConnection();  // The socket did not survive
+                xEventGroupWaitBits(event_group_, WEBHOOK_EVENT_NETWORK_READY, pdFALSE, pdTRUE, portMAX_DELAY);
+            }
             if (Send(*item)) {
                 break;
             }
@@ -138,7 +163,7 @@ void WebhookClient::Run() {
     }
 }
 
-bool WebhookClient::Send(const std::string& body, int* status_code) {
+bool WebhookClient::Send(const std::string& body) {
     std::string url;
     std::string auth_token;
     {
@@ -147,9 +172,41 @@ bool WebhookClient::Send(const std::string& body, int* status_code) {
         auth_token = auth_token_;
     }
     if (url.empty()) {
+        CloseConnection();
         return true;  // Disabled meanwhile, nothing to do
     }
+    if (client_ != nullptr && url != client_url_) {
+        CloseConnection();
+    }
 
+    // The server may have closed a kept-alive connection in the meantime
+    // (many do after 5-75 s idle), which only shows when it is used
+    bool reused = client_ != nullptr;
+    if (client_ == nullptr) {
+        client_ = CreateClient(url);
+        if (client_ == nullptr) {
+            return false;
+        }
+        client_url_ = url;
+    }
+    int status = 0;
+    esp_err_t err = Perform(client_, body, auth_token, &status);
+    if (err != ESP_OK && reused) {
+        ESP_LOGI(TAG, "Kept-alive connection failed (%s), reconnecting", esp_err_to_name(err));
+        err = Perform(client_, body, auth_token, &status);
+    }
+    return IsDone(err, status);
+}
+
+void WebhookClient::CloseConnection() {
+    if (client_ != nullptr) {
+        esp_http_client_cleanup(client_);
+        client_ = nullptr;
+        client_url_.clear();
+    }
+}
+
+esp_http_client_handle_t WebhookClient::CreateClient(const std::string& url) {
     esp_http_client_config_t config = {};
     config.url = url.c_str();
     config.method = HTTP_METHOD_POST;
@@ -159,31 +216,44 @@ bool WebhookClient::Send(const std::string& body, int* status_code) {
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == nullptr) {
         ESP_LOGE(TAG, "Failed to create HTTP client");
-        return false;
+        return nullptr;
     }
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_http_client_set_header(client, "User-Agent", "ANCS-ESP32/" PROJECT_VERSION);
-    if (!auth_token.empty()) {
+    return client;
+}
+
+esp_err_t WebhookClient::Perform(esp_http_client_handle_t client, const std::string& body,
+                                 const std::string& auth_token, int* status_code) {
+    if (auth_token.empty()) {
+        esp_http_client_delete_header(client, "Authorization");
+    } else {
         esp_http_client_set_header(client, "Authorization", auth_token.c_str());
     }
     esp_http_client_set_post_field(client, body.data(), body.size());
 
+    // Reuses the open connection if there is one. After a complete response
+    // the client keeps it, unless the server answered "Connection: close".
     esp_err_t err = esp_http_client_perform(client);
-    int status = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
+    if (err != ESP_OK) {
+        // The request may have stopped halfway; start the next one from scratch
+        esp_http_client_close(client);
+        return err;
+    }
+    *status_code = esp_http_client_get_status_code(client);
+    return ESP_OK;
+}
 
+bool WebhookClient::IsDone(esp_err_t err, int status_code) {
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "POST failed: %s", esp_err_to_name(err));
         return false;
     }
-    if (status_code != nullptr) {
-        *status_code = status;
-    }
-    if (status < 200 || status >= 300) {
-        ESP_LOGW(TAG, "POST returned HTTP %d", status);
+    if (status_code < 200 || status_code >= 300) {
+        ESP_LOGW(TAG, "POST returned HTTP %d", status_code);
         // Client errors will not succeed on retry
-        return status >= 400 && status < 500;
+        return status_code >= 400 && status_code < 500;
     }
-    ESP_LOGI(TAG, "POST ok, HTTP %d", status);
+    ESP_LOGI(TAG, "POST ok, HTTP %d", status_code);
     return true;
 }
