@@ -200,7 +200,7 @@ button:disabled { opacity:.5; cursor:not-allowed; }
 const $ = id => document.getElementById(id);
 const CATEGORY = { Other:'其他', IncomingCall:'来电', MissedCall:'未接来电', Voicemail:'语音留言', Social:'社交', Schedule:'日程',
   Email:'邮件', News:'新闻', HealthAndFitness:'健康', BusinessAndFinance:'财务', Location:'位置', Entertainment:'娱乐' };
-let status = null, timer = null;
+let status = null, timer = null, diagTimer = null;
 
 async function api(path, opts = {}) {
   const r = await fetch(path, opts);
@@ -234,10 +234,9 @@ function rssi(v) { return v ? v + ' dBm' + (v > -60 ? '（强）' : v > -75 ? '�
 function switchTab(name) {
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.tab === name));
   document.querySelectorAll('section').forEach(s => s.classList.toggle('active', s.id === name));
-  clearInterval(timer);
-  const refresh = { overview: loadStatus, notifications: loadNotifications, ota: loadStatus,
-                    system: () => { loadDiag(); loadLogs(); } }[name];
-  if (name === 'system') followLog = true;
+  clearInterval(timer); clearInterval(diagTimer);
+  const refresh = { overview: loadStatus, notifications: loadNotifications, ota: loadStatus, system: loadLogs }[name];
+  if (name === 'system') { followLog = true; loadDiag(); diagTimer = setInterval(loadDiag, 10000); }
   if (name === 'settings') loadConfig();
   if (name === 'wifi') loadWifi();
   if (refresh) { refresh(); timer = setInterval(refresh, { notifications: 5000, system: 3000 }[name] || 10000); }
