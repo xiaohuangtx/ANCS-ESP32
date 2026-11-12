@@ -7,6 +7,19 @@
 struct cJSON;
 
 /**
+ * Webhook delivery state of a notification. The values only clear bits going
+ * from kPending to a final state, so the flash copy is updated in place.
+ */
+enum class UploadState : uint8_t {
+    kPending = 0xFF,    // Queued, or in flight
+    kDelivered = 0x7F,  // The server answered 2xx
+    kFailed = 0x3F,     // Rejected (4xx), given up after retries, or dropped
+    kSkipped = 0x1F,    // No webhook URL configured
+};
+
+const char* UploadStateName(UploadState state);
+
+/**
  * An iOS notification received through ANCS ("added" / "modified" events;
  * "removed" events are consumed internally and never emitted).
  */

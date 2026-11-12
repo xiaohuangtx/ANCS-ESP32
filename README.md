@@ -38,7 +38,8 @@ ANCS-ESP32/
     │   └── dns_server.*   # 配网热点的 DNS，所有域名都解析到 192.168.4.1
     ├── notification/
     │   ├── notification.* # 通知数据结构、控制台打印、JSON 序列化
-    │   ├── notification_history.* # 最近通知记录（内存）
+    │   ├── notification_history.* # 最近通知记录及上传状态（管理后台显示）
+    │   ├── notification_store.* # 通知记录持久化（`storage` 分区上的环形日志）
     │   └── webhook_client.*
     ├── web/
     │   ├── web_server.*   # 管理后台 HTTP 服务 + OTA
@@ -60,9 +61,23 @@ idf.py -p /dev/cu.usbmodemXXXX flash monitor
 
 > 修改 `sdkconfig.defaults` 后需要删除 `sdkconfig` 或重新 `set-target` 才会生效。
 
-默认按 16MB Flash 配置（`partitions/16m.csv`：两个 4MB OTA 分区 + 8MB `storage`）。
+默认按 16MB Flash 配置（`partitions/16m.csv`：两个 4MB OTA 分区 + 8MB `storage`，其中前 2MB 保存通知记录，其余预留）。
 Flash 较小的板子可在 menuconfig 中把 `Partition Table > Custom partition CSV file` 改为
 `partitions/4m.csv` 或 `partitions/8m.csv`，并相应修改 `Serial flasher config > Flash size`。
+这两个分区表没有 `storage` 分区，通知记录只保存在内存中，重启后清空。
+
+> OTA 升级不会更新分区表，所以 `storage` 分区固定为 8MB，由代码按偏移划分用途：以后新增要保存的内容时只需 OTA，不必用 USB 重新烧录。之前烧录的设备（子类型为 `spiffs`）无需重新烧录，固件按名称查找分区。
+
+### 通知记录持久化
+
+有 `storage` 分区时，每条通知及其 Webhook 上传状态都会写入 Flash（`NotificationStore`），重启后恢复：
+
+- 存储格式是环形日志：按 4KB 扇区顺序追加，写满 2MB 后擦除最旧的扇区循环使用，每个扇区的擦写次数相同。每条记录带 CRC，写入中途掉电只会丢失这一条
+- 上传状态（等待上传 / 已上传 / 上传失败 / 未配置）只占记录头里的一个字节，状态变化时只把 bit 由 1 改为 0，原地写入，不擦除扇区
+- 每条通知约 0.25 次扇区擦除（正文 512 字节时一条最大约 1KB）。按 NOR Flash 每扇区 10 万次擦写估算：每天 1000 条可用数百年；即使每秒 1 条、24 小时不停，也能用约 6 年
+- 管理后台显示最近的若干条（默认 30，最多 100）；更早的记录仍留在 Flash 中，直到被循环覆盖。「清空」只是让已有记录不再显示（NVS namespace `history`，key `cleared`），不会擦除 Flash
+- 重启前还没上传完成的通知，开机后会重新发送（最多 `CONFIG_WEBHOOK_QUEUE_SIZE / 2` 条最新的，更早的记为上传失败）。如果断电时请求已经到达服务器、但还没收到响应，这条通知会被重复发送
+- 设备没有校准时钟，所以重启前收到的记录在页面上显示为「重启前」，通知本身的时间以 iOS 提供的 `date` 为准
 
 ## 使用
 
@@ -92,7 +107,7 @@ Actions  : [] / [清除]
 设备连上 Wi-Fi 后，串口会打印 `Admin page: http://192.168.x.x/`，用同一局域网内的电脑或手机浏览器打开即可：
 
 - **概览**：蓝牙名称（`ANCS-XXXXXX`，页面标题也会显示，方便区分多块板子）、固件版本、IP、Wi-Fi 信号、蓝牙连接数、内存
-- **通知记录**：列表中正文最多显示 3 行，点击任意一条弹出完整内容和详情（App ID、来源设备、操作按钮等）。最近收到的通知（默认 30 条，可在「设置」中改为 1–100 条），每 5 秒自动刷新。同一条通知的 `modified` 事件会覆盖之前的记录。记录只保存在内存中，重启后清空
+- **通知记录**：列表中正文最多显示 3 行，点击任意一条弹出完整内容和详情（App ID、来源设备、操作按钮等）。最近收到的通知（默认 30 条，可在「设置」中改为 1–100 条），每 5 秒自动刷新。同一条通知的 `modified` 事件会覆盖之前的记录。等待上传和上传失败的通知会有标记。有 `storage` 分区时记录保存在 Flash 中（见[通知记录持久化](#通知记录持久化)），否则重启后清空
 - **设置**：Webhook URL / Authorization（保存后立即生效，可发送测试通知）、蓝牙同时连接数量、通知保存条数、管理密码
 - **Wi-Fi**：查看、添加、编辑（改名称 / 密码）、删除已保存的 Wi-Fi（最多 10 个，存于 NVS namespace `wifi`，与配网热点页面共用）。密码不会回显。设备总是连接信号最强的已保存 Wi-Fi，所以没有优先级设置；修改不影响当前连接，在下次重新扫描连接或重启后生效
 - **固件升级**：选择 `build/ancs-esp32.bin` 上传。设备会检查芯片型号和项目名，写入另一个 OTA 分区后自动重启；新固件连上 Wi-Fi、管理后台启动后才会被确认，如果新固件在此之前崩溃重启，bootloader 会自动回滚到旧版本
@@ -114,7 +129,7 @@ Actions  : [] / [清除]
 
 - **日志提示 `ANCS service not found`**：iPhone 上没有开启「共享系统通知」，开启后会自动重试。
 - **日志提示 `pairing keys do not match`**：ESP32 的绑定信息被清除（例如擦除了 Flash 或三击了 BOOT 键），但 iPhone 还保留着旧的配对。请在 iPhone 上「忽略此设备」后重新配对。
-- 订阅成功后 iOS 会把通知中心里已有的通知全部重发一次（`PreExisting` 标记）。iPhone 断开重连时，已经上报过的通知会被识别并跳过（在内存中记住最近 256 条，ESP32 重启后清空），不会重复写入通知记录或发送 Webhook；断线期间新收到的通知仍会上报。如果完全不需要已有通知，可在 menuconfig 中开启 `Ignore pre-existing notifications`。
+- 订阅成功后 iOS 会把通知中心里已有的通知全部重发一次（`PreExisting` 标记）。iPhone 断开重连时，已经上报过的通知会被识别并跳过（记住最近 256 条；有 `storage` 分区时开机会从 Flash 中的记录恢复，所以 ESP32 重启后也不会重复上报，否则重启后清空），不会重复写入通知记录或发送 Webhook；断线期间新收到的通知仍会上报。如果完全不需要已有通知，可在 menuconfig 中开启 `Ignore pre-existing notifications`。
 
 ## Webhook
 

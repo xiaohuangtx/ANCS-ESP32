@@ -97,9 +97,12 @@ config NOTIFICATION_HISTORY_SIZE
     range 1 100
     default 30
     help
-        The most recent notifications are kept in RAM and shown on the admin
-        page (http://<device IP>/). Can be changed on the page; the value is
-        stored in NVS (namespace "history", key "size").
+        The most recent notifications are shown on the admin page
+        (http://<device IP>/). Can be changed on the page; the value is stored
+        in NVS (namespace "history", key "size"). With a "storage" partition
+        (partitions/16m.csv) notifications and their webhook delivery state are
+        also kept in flash (first 2 MB of it) and reloaded on boot; otherwise
+        (4m.csv / 8m.csv) they are lost on reboot.
 
 config WEB_ADMIN_PASSWORD
     string "Default admin password"

@@ -3,6 +3,7 @@
 #include "wifi_service.h"
 #include "webhook_client.h"
 #include "notification_history.h"
+#include "notification_store.h"
 #include "web_server.h"
 #include "ancs_defs.h"
 
@@ -19,6 +20,9 @@
 static constexpr int kClockTickSeconds = 60;
 // Notifications remembered to recognize them when iOS replays them
 static constexpr size_t kMaxReportedNotifications = 256;
+// Uploads left pending by a reboot that are sent again; older ones count as
+// failed, so they do not crowd out new notifications in the webhook queue
+static constexpr size_t kMaxResentNotifications = std::max(1, CONFIG_WEBHOOK_QUEUE_SIZE / 2);
 
 // Identifies a notification across reconnections: the uid alone could repeat
 // after the iPhone restarts, so the content is part of it
@@ -75,8 +79,18 @@ void Application::Initialize() {
 
     InitializeButtons();
 
+    // Reload what survived the reboot, so a replay of Notification Center
+    // is still recognized
+    NotificationHistory::GetInstance();
+    LoadReportedNotifications();
+
     // Webhook task waits for Wi-Fi before sending anything
-    WebhookClient::GetInstance().Start();
+    auto& webhook = WebhookClient::GetInstance();
+    webhook.SetResultCallback([](uint32_t id, UploadState state) {
+        NotificationHistory::GetInstance().SetUploadState(id, state);
+    });
+    webhook.Start();
+    ResendPendingNotifications();
 
     // Wi-Fi: connect to a stored network, or open the provisioning hotspot
     auto& wifi = WifiService::GetInstance();
@@ -138,6 +152,31 @@ void Application::InitializeButtons() {
 #endif
 }
 
+void Application::LoadReportedNotifications() {
+    NotificationStore::GetInstance().ForEach([this](const StoredNotification& stored) {
+        reported_notifications_.push_front(Fingerprint(stored.notification));
+        return reported_notifications_.size() < kMaxReportedNotifications;
+    });
+}
+
+void Application::ResendPendingNotifications() {
+    auto& store = NotificationStore::GetInstance();
+    auto& webhook = WebhookClient::GetInstance();
+    auto ids = store.GetPendingIds();  // Oldest first
+    if (ids.empty()) {
+        return;
+    }
+    ESP_LOGI(TAG, "%d notifications were not uploaded before the reboot", (int)ids.size());
+    for (size_t i = 0; i < ids.size(); i++) {
+        StoredNotification stored;
+        if (ids.size() - i <= kMaxResentNotifications && store.ReadPending(ids[i], &stored)) {
+            webhook.Post(ids[i], stored.notification.ToJson());
+        } else {
+            NotificationHistory::GetInstance().SetUploadState(ids[i], UploadState::kFailed);
+        }
+    }
+}
+
 void Application::OnNotification(const AncsNotification& notification) {
     // iOS replays Notification Center, flagged PreExisting, on every connection.
     // Drop the ones already reported over an earlier connection; pre-existing
@@ -158,8 +197,10 @@ void Application::OnNotification(const AncsNotification& notification) {
     }
 
     notification.Print();
-    NotificationHistory::GetInstance().Add(notification);
-    WebhookClient::GetInstance().Post(notification.ToJson());
+    auto& webhook = WebhookClient::GetInstance();
+    uint32_t id = NotificationHistory::GetInstance().Add(
+        notification, webhook.IsEnabled() ? UploadState::kPending : UploadState::kSkipped);
+    webhook.Post(id, notification.ToJson());
 }
 
 void Application::Run() {

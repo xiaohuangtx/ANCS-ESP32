@@ -29,6 +29,16 @@ static std::string GetDeviceId() {
     return buf;
 }
 
+const char* UploadStateName(UploadState state) {
+    switch (state) {
+        case UploadState::kPending: return "pending";
+        case UploadState::kDelivered: return "delivered";
+        case UploadState::kFailed: return "failed";
+        case UploadState::kSkipped: return "skipped";
+    }
+    return "failed";
+}
+
 bool AncsNotification::IsMessageTruncated() const {
     // A cut may land up to 3 bytes early to keep a UTF-8 character whole
     return (size_t)message_size > message.size() || message.size() + 3 >= CONFIG_ANCS_MAX_MESSAGE_LEN;

@@ -16,6 +16,10 @@ static constexpr int kTaskStackSize = 6144;
 // A kept-alive connection is closed after this long without requests
 static constexpr int kIdleCloseMs = 30000;
 
+void WebhookClient::SetResultCallback(std::function<void(uint32_t id, UploadState state)> callback) {
+    result_callback_ = std::move(callback);
+}
+
 void WebhookClient::Start() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -30,7 +34,7 @@ void WebhookClient::Start() {
         ESP_LOGI(TAG, "Webhook URL: %s", url_.c_str());
     }
 
-    queue_ = xQueueCreate(CONFIG_WEBHOOK_QUEUE_SIZE, sizeof(std::string*));
+    queue_ = xQueueCreate(CONFIG_WEBHOOK_QUEUE_SIZE, sizeof(Request*));
     event_group_ = xEventGroupCreate();
     xTaskCreate([](void* arg) {
         static_cast<WebhookClient*>(arg)->Run();
@@ -78,14 +82,19 @@ void WebhookClient::SetNetworkReady(bool ready) {
     }
 }
 
-void WebhookClient::Post(const std::string& json) {
-    if (queue_ == nullptr || !IsEnabled()) {
-        return;
-    }
-    auto* item = new std::string(json);
-    if (xQueueSend(queue_, &item, 0) != pdTRUE) {
+void WebhookClient::Post(uint32_t id, const std::string& json) {
+    UploadState result = UploadState::kSkipped;
+    if (queue_ != nullptr && IsEnabled()) {
+        auto* item = new Request{id, json};
+        if (xQueueSend(queue_, &item, 0) == pdTRUE) {
+            return;
+        }
         ESP_LOGW(TAG, "Queue full, notification dropped");
         delete item;
+        result = UploadState::kFailed;
+    }
+    if (result_callback_) {
+        result_callback_(id, result);
     }
 }
 
@@ -124,14 +133,14 @@ int WebhookClient::SendTest() {
     }
     int status = -1;
     esp_err_t err = Perform(client, body, auth_token, &status);
-    IsDone(err, status);
+    GetResult(err, status);
     esp_http_client_cleanup(client);
     return err == ESP_OK ? status : -1;
 }
 
 void WebhookClient::Run() {
     while (true) {
-        std::string* item = nullptr;
+        Request* item = nullptr;
         TickType_t wait = client_ != nullptr ? pdMS_TO_TICKS(kIdleCloseMs) : portMAX_DELAY;
         if (xQueueReceive(queue_, &item, wait) != pdTRUE) {
             CloseConnection();  // Idle
@@ -139,13 +148,15 @@ void WebhookClient::Run() {
         }
 
         int attempt = 1;
+        UploadState result;
         while (true) {
             // Hold the payload until Wi-Fi is up, also between retries
             if (!(xEventGroupGetBits(event_group_) & WEBHOOK_EVENT_NETWORK_READY)) {
                 CloseConnection();  // The socket did not survive
                 xEventGroupWaitBits(event_group_, WEBHOOK_EVENT_NETWORK_READY, pdFALSE, pdTRUE, portMAX_DELAY);
             }
-            if (Send(*item)) {
+            result = Send(item->body);
+            if (result != UploadState::kPending) {
                 break;
             }
             if (!(xEventGroupGetBits(event_group_) & WEBHOOK_EVENT_NETWORK_READY)) {
@@ -154,16 +165,20 @@ void WebhookClient::Run() {
             }
             if (attempt == kMaxAttempts) {
                 ESP_LOGE(TAG, "Giving up after %d attempts", kMaxAttempts);
+                result = UploadState::kFailed;
                 break;
             }
             vTaskDelay(pdMS_TO_TICKS(1000 * attempt));
             attempt++;
         }
+        if (result_callback_) {
+            result_callback_(item->id, result);
+        }
         delete item;
     }
 }
 
-bool WebhookClient::Send(const std::string& body) {
+UploadState WebhookClient::Send(const std::string& body) {
     std::string url;
     std::string auth_token;
     {
@@ -173,7 +188,7 @@ bool WebhookClient::Send(const std::string& body) {
     }
     if (url.empty()) {
         CloseConnection();
-        return true;  // Disabled meanwhile, nothing to do
+        return UploadState::kSkipped;  // Disabled meanwhile
     }
     if (client_ != nullptr && url != client_url_) {
         CloseConnection();
@@ -185,7 +200,7 @@ bool WebhookClient::Send(const std::string& body) {
     if (client_ == nullptr) {
         client_ = CreateClient(url);
         if (client_ == nullptr) {
-            return false;
+            return UploadState::kPending;
         }
         client_url_ = url;
     }
@@ -195,7 +210,7 @@ bool WebhookClient::Send(const std::string& body) {
         ESP_LOGI(TAG, "Kept-alive connection failed (%s), reconnecting", esp_err_to_name(err));
         err = Perform(client_, body, auth_token, &status);
     }
-    return IsDone(err, status);
+    return GetResult(err, status);
 }
 
 void WebhookClient::CloseConnection() {
@@ -244,16 +259,16 @@ esp_err_t WebhookClient::Perform(esp_http_client_handle_t client, const std::str
     return ESP_OK;
 }
 
-bool WebhookClient::IsDone(esp_err_t err, int status_code) {
+UploadState WebhookClient::GetResult(esp_err_t err, int status_code) {
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "POST failed: %s", esp_err_to_name(err));
-        return false;
+        return UploadState::kPending;
     }
     if (status_code < 200 || status_code >= 300) {
         ESP_LOGW(TAG, "POST returned HTTP %d", status_code);
         // Client errors will not succeed on retry
-        return status_code >= 400 && status_code < 500;
+        return status_code >= 400 && status_code < 500 ? UploadState::kFailed : UploadState::kPending;
     }
     ESP_LOGI(TAG, "POST ok, HTTP %d", status_code);
-    return true;
+    return UploadState::kDelivered;
 }

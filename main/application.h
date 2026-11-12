@@ -50,6 +50,8 @@ private:
     ~Application();
 
     void InitializeButtons();
+    void LoadReportedNotifications();
+    void ResendPendingNotifications();
     void OnNotification(const AncsNotification& notification);
     void PrintHeapStats();
 
@@ -58,8 +60,8 @@ private:
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     std::unique_ptr<Button> boot_button_;
-    // Fingerprints of the notifications reported so far, oldest first.
-    // Only used by the main task.
+    // Fingerprints of the notifications reported so far, oldest first, also
+    // from before the reboot when stored in flash. Only used by the main task.
     std::deque<size_t> reported_notifications_;
 };
 

@@ -5,4 +5,7 @@ otadata,  data, ota,     0xf000,    0x2000,
 phy_init, data, phy,     0x11000,   0x1000,
 ota_0,    app,  ota_0,   0x20000,   0x3f0000,
 ota_1,    app,  ota_1,   0x410000,  0x3f0000,
-storage,  data, spiffs,  0x800000,  0x800000,
+# Raw data, split by offset in code so new uses come with an OTA update:
+# 0x000000-0x1FFFFF notification records (ring log, NotificationStore)
+# 0x200000-0x7FFFFF free
+storage,  data, undefined, 0x800000,  0x800000,

@@ -325,6 +325,7 @@ esp_err_t WebServer::HandleGetConfig(httpd_req_t* req) {
     cJSON_AddNumberToObject(json, "history_size", NotificationHistory::GetInstance().GetCapacity());
     cJSON_AddNumberToObject(json, "history_size_min", NotificationHistory::kMinCapacity);
     cJSON_AddNumberToObject(json, "history_size_max", NotificationHistory::kMaxCapacity);
+    cJSON_AddBoolToObject(json, "history_persistent", NotificationHistory::GetInstance().IsPersistent());
     cJSON_AddNumberToObject(json, "ble_max_connections", BleManager::GetInstance().GetMaxConnections());
     cJSON_AddNumberToObject(json, "ble_max_connections_limit", BleManager::kMaxConnections);
     cJSON_AddBoolToObject(json, "has_password", self->HasPassword());

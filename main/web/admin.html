@@ -120,7 +120,7 @@ button:disabled { opacity:.5; cursor:not-allowed; }
     <h2>通知记录</h2>
     <label>保存条数</label>
     <input type="number" id="hsize" min="1" max="100">
-    <div class="hint" id="hsizehint">只保存在内存中，重启后清空。</div>
+    <div class="hint" id="hsizehint"></div>
     <div class="actions"><button class="primary" id="hsave">保存</button><span class="msg" id="hmsg"></span></div>
   </div>
   <div class="card">
@@ -209,6 +209,7 @@ function duration(s) {
   return (d ? d + ' 天 ' : '') + (d || h ? h + ' 小时 ' : '') + m + ' 分钟';
 }
 function ago(s) {
+  if (s == null) return '重启前';
   if (s < 60) return '刚刚';
   if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
   if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
@@ -268,12 +269,15 @@ async function loadNotifications() {
   });
 }
 let notifications = [], maxMessageLen = 0;
+const UPLOAD = { pending:'等待上传', delivered:'已上传', failed:'上传失败', skipped:'未配置，未上传' };
 function appName(n) { return n.app_name || n.app_id || '未知应用'; }
 function badges(n) {
   const b = [`<span class="badge">${esc(CATEGORY[n.category] || n.category)}</span>`];
   if (n.event === 'modified') b.push('<span class="badge gray">已更新</span>');
   if (n.flags.important) b.push('<span class="badge red">重要</span>');
   if (n.flags.pre_existing) b.push('<span class="badge gray">历史</span>');
+  if (n.upload === 'pending') b.push('<span class="badge gray">待上传</span>');
+  if (n.upload === 'failed') b.push('<span class="badge red">上传失败</span>');
   return b.join(' ');
 }
 function openNotification(n) {
@@ -289,7 +293,7 @@ function openNotification(n) {
     <div class="grid">${kv([['时间', n.date ? n.date.replace('T', ' ') : '-'], ['收到', ago(n.received_ago)],
       ['来自设备', (n.peer_name || '-') + (n.peer_address ? ' (' + n.peer_address + ')' : '')], ['App ID', n.app_id || '-'],
       ['分类', (CATEGORY[n.category] || n.category) + (n.category_count > 1 ? `（共 ${n.category_count} 条）` : '')],
-      ['操作按钮', actions || '-'], ['标记', flags || '-'], ['UID', n.uid]])}</div>`;
+      ['操作按钮', actions || '-'], ['标记', flags || '-'], ['Webhook', UPLOAD[n.upload] || '-'], ['UID', n.uid]])}</div>`;
   $('mcontent').scrollTop = 0;
   $('nmodal').classList.add('open');
 }
@@ -313,7 +317,8 @@ async function loadConfig() {
   $('whauthclear').style.display = c.has_webhook_auth ? '' : 'none';
   $('hsize').value = c.history_size;
   $('hsize').min = c.history_size_min; $('hsize').max = c.history_size_max;
-  $('hsizehint').textContent = `范围 ${c.history_size_min}–${c.history_size_max}。只保存在内存中，重启后清空。`;
+  $('hsizehint').textContent = `范围 ${c.history_size_min}–${c.history_size_max}。` +
+    (c.history_persistent ? '保存在 Flash 中，重启后保留。' : '只保存在内存中，重启后清空。');
   $('bmax').value = c.ble_max_connections;
   $('bmax').max = c.ble_max_connections_limit;
   $('bmaxhint').textContent = `范围 1–${c.ble_max_connections_limit}，立即生效。调小时已连接的设备不会被断开，只是不再接受新设备。`;
