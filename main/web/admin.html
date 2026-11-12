@@ -105,9 +105,9 @@ button:disabled { opacity:.5; cursor:not-allowed; }
     <label>URL（留空则关闭）</label>
     <input type="url" id="whurl" placeholder="https://example.com/ancs">
     <label>Authorization 请求头（可选）</label>
-    <input type="text" id="whauth" placeholder="Bearer xxxxxx">
-    <div class="hint">每条通知以 JSON 格式 POST 到该地址。测试会先保存再发送一条 event 为 "test" 的示例通知。</div>
-    <div class="actions"><button class="primary" id="whsave">保存</button><button id="whtest">保存并测试</button><span class="msg" id="whmsg"></span></div>
+    <input type="text" id="whauth" placeholder="Bearer xxxxxx" autocomplete="off">
+    <div class="hint">每条通知以 JSON 格式 POST 到该地址。测试会先保存再发送一条 event 为 "test" 的示例通知。已保存的 Authorization 不会显示，留空保存则保持不变。</div>
+    <div class="actions"><button class="primary" id="whsave">保存</button><button id="whtest">保存并测试</button><button class="danger" id="whauthclear">清除 Authorization</button><span class="msg" id="whmsg"></span></div>
   </div>
   <div class="card">
     <h2>蓝牙</h2>
@@ -308,7 +308,9 @@ async function loadConfig() {
   let c;
   try { c = await api('/api/config'); } catch (e) { return; }
   $('whurl').value = c.webhook_url;
-  $('whauth').value = c.webhook_auth;
+  $('whauth').value = '';
+  $('whauth').placeholder = c.has_webhook_auth ? '已设置（留空保持不变）' : 'Bearer xxxxxx';
+  $('whauthclear').style.display = c.has_webhook_auth ? '' : 'none';
   $('hsize').value = c.history_size;
   $('hsize').min = c.history_size_min; $('hsize').max = c.history_size_max;
   $('hsizehint').textContent = `范围 ${c.history_size_min}–${c.history_size_max}。只保存在内存中，重启后清空。`;
@@ -320,10 +322,19 @@ async function loadConfig() {
   $('pwclear').style.display = c.has_password ? '' : 'none';
 }
 async function saveWebhook() {
-  await postJson('/api/config', { webhook_url: $('whurl').value.trim(), webhook_auth: $('whauth').value.trim() });
+  const body = { webhook_url: $('whurl').value.trim() };
+  const auth = $('whauth').value.trim();
+  if (auth) body.webhook_auth = auth;
+  await postJson('/api/config', body);
+  if (auth) loadConfig();
 }
 $('whsave').onclick = async () => {
   try { await saveWebhook(); show('whmsg', '已保存', true); } catch (e) { show('whmsg', e.message); }
+};
+$('whauthclear').onclick = async () => {
+  if (!confirm('确定清除 Authorization 请求头？')) return;
+  try { await postJson('/api/config', { webhook_auth: '' }); show('whmsg', '已清除', true); loadConfig(); }
+  catch (e) { show('whmsg', e.message); }
 };
 $('whtest').onclick = async () => {
   $('whtest').disabled = true; show('whmsg', '发送中…', true);

@@ -320,7 +320,8 @@ esp_err_t WebServer::HandleGetConfig(httpd_req_t* req) {
     auto& webhook = WebhookClient::GetInstance();
     cJSON* json = cJSON_CreateObject();
     cJSON_AddStringToObject(json, "webhook_url", webhook.GetUrl().c_str());
-    cJSON_AddStringToObject(json, "webhook_auth", webhook.GetAuthToken().c_str());
+    // Like the Wi-Fi passwords, the token is never sent back
+    cJSON_AddBoolToObject(json, "has_webhook_auth", !webhook.GetAuthToken().empty());
     cJSON_AddNumberToObject(json, "history_size", NotificationHistory::GetInstance().GetCapacity());
     cJSON_AddNumberToObject(json, "history_size_min", NotificationHistory::kMinCapacity);
     cJSON_AddNumberToObject(json, "history_size_max", NotificationHistory::kMaxCapacity);
