@@ -17,7 +17,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <strings.h>
 #include <memory>
 
 #define TAG "WebServer"
@@ -175,42 +174,7 @@ static std::string GetHeader(httpd_req_t* req, const char* name) {
     return value;
 }
 
-// With DNS rebinding a hostile domain resolves to the device, so the browser
-// treats the device as part of that site. Such requests carry the hostile
-// domain in Host: only accept an IP address or the device's own hostname
-// (e.g. "ancs-a1b2c3.lan" from the router's DNS).
-static bool IsAllowedHost(const std::string& host) {
-    if (host.empty() || host[0] == '[') {
-        return true;  // HTTP/1.0 without Host, or an IPv6 literal
-    }
-    std::string name = host.substr(0, host.find(':'));
-    esp_ip4_addr_t ip;
-    if (esp_netif_str_to_ip4(name.c_str(), &ip) == ESP_OK) {
-        return true;
-    }
-    std::string label = name.substr(0, name.find('.'));
-    return strcasecmp(label.c_str(), WifiService::GetInstance().GetDeviceName().c_str()) == 0;
-}
-
-bool WebServer::CheckRequest(httpd_req_t* req) {
-    std::string host = GetHeader(req, "Host");
-    if (!IsAllowedHost(host)) {
-        ESP_LOGW(TAG, "Rejected request for host \"%s\"", host.c_str());
-        SendError(req, "403 Forbidden", "请使用设备的 IP 地址访问");
-        return false;
-    }
-    // Browsers send Origin with every POST / PUT / DELETE; requests from other
-    // tools usually have none. Content-Type alone would not cover the requests
-    // without a body (reboot, clear bonds, ...).
-    if (req->method != HTTP_GET) {
-        std::string origin = GetHeader(req, "Origin");
-        if (!origin.empty() && origin != "http://" + host) {
-            ESP_LOGW(TAG, "Rejected cross-site request from \"%s\"", origin.c_str());
-            SendError(req, "403 Forbidden", "不允许跨站请求");
-            return false;
-        }
-    }
-
+bool WebServer::CheckAuth(httpd_req_t* req) {
     std::string expected;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -231,7 +195,7 @@ bool WebServer::CheckRequest(httpd_req_t* req) {
 }
 
 esp_err_t WebServer::HandleIndex(httpd_req_t* req) {
-    if (!Self(req)->CheckRequest(req)) {
+    if (!Self(req)->CheckAuth(req)) {
         return ESP_OK;
     }
     httpd_resp_set_type(req, "text/html; charset=utf-8");
@@ -240,7 +204,7 @@ esp_err_t WebServer::HandleIndex(httpd_req_t* req) {
 }
 
 esp_err_t WebServer::HandleStatus(httpd_req_t* req) {
-    if (!Self(req)->CheckRequest(req)) {
+    if (!Self(req)->CheckAuth(req)) {
         return ESP_OK;
     }
     auto app_desc = esp_app_get_description();
@@ -293,7 +257,7 @@ esp_err_t WebServer::HandleStatus(httpd_req_t* req) {
 }
 
 esp_err_t WebServer::HandleGetNotifications(httpd_req_t* req) {
-    if (!Self(req)->CheckRequest(req)) {
+    if (!Self(req)->CheckAuth(req)) {
         return ESP_OK;
     }
     auto& history = NotificationHistory::GetInstance();
@@ -305,7 +269,7 @@ esp_err_t WebServer::HandleGetNotifications(httpd_req_t* req) {
 }
 
 esp_err_t WebServer::HandleClearNotifications(httpd_req_t* req) {
-    if (!Self(req)->CheckRequest(req)) {
+    if (!Self(req)->CheckAuth(req)) {
         return ESP_OK;
     }
     NotificationHistory::GetInstance().Clear();
@@ -314,7 +278,7 @@ esp_err_t WebServer::HandleClearNotifications(httpd_req_t* req) {
 
 esp_err_t WebServer::HandleGetConfig(httpd_req_t* req) {
     auto* self = Self(req);
-    if (!self->CheckRequest(req)) {
+    if (!self->CheckAuth(req)) {
         return ESP_OK;
     }
     auto& webhook = WebhookClient::GetInstance();
@@ -336,7 +300,7 @@ esp_err_t WebServer::HandleGetConfig(httpd_req_t* req) {
 // {"webhook_url", "webhook_auth", "history_size", "ble_max_connections", "password"}
 esp_err_t WebServer::HandleSetConfig(httpd_req_t* req) {
     auto* self = Self(req);
-    if (!self->CheckRequest(req)) {
+    if (!self->CheckAuth(req)) {
         return ESP_OK;
     }
     cJSON* json = ReadJsonBody(req);
@@ -401,7 +365,7 @@ esp_err_t WebServer::HandleSetConfig(httpd_req_t* req) {
 }
 
 esp_err_t WebServer::HandleWebhookTest(httpd_req_t* req) {
-    if (!Self(req)->CheckRequest(req)) {
+    if (!Self(req)->CheckAuth(req)) {
         return ESP_OK;
     }
     auto& webhook = WebhookClient::GetInstance();
@@ -416,7 +380,7 @@ esp_err_t WebServer::HandleWebhookTest(httpd_req_t* req) {
 }
 
 esp_err_t WebServer::HandleReboot(httpd_req_t* req) {
-    if (!Self(req)->CheckRequest(req)) {
+    if (!Self(req)->CheckAuth(req)) {
         return ESP_OK;
     }
     ScheduleRestart();
@@ -424,7 +388,7 @@ esp_err_t WebServer::HandleReboot(httpd_req_t* req) {
 }
 
 esp_err_t WebServer::HandleClearBonds(httpd_req_t* req) {
-    if (!Self(req)->CheckRequest(req)) {
+    if (!Self(req)->CheckAuth(req)) {
         return ESP_OK;
     }
     BleManager::GetInstance().ClearBonds();
@@ -432,7 +396,7 @@ esp_err_t WebServer::HandleClearBonds(httpd_req_t* req) {
 }
 
 esp_err_t WebServer::HandleWifiConfigMode(httpd_req_t* req) {
-    if (!Self(req)->CheckRequest(req)) {
+    if (!Self(req)->CheckAuth(req)) {
         return ESP_OK;
     }
     // Entering config mode stops this server, which cannot be done from one of
@@ -448,7 +412,7 @@ esp_err_t WebServer::HandleWifiConfigMode(httpd_req_t* req) {
 
 // Passwords are never sent back, only whether one is set
 esp_err_t WebServer::HandleGetWifi(httpd_req_t* req) {
-    if (!Self(req)->CheckRequest(req)) {
+    if (!Self(req)->CheckAuth(req)) {
         return ESP_OK;
     }
     auto& wifi = WifiService::GetInstance();
@@ -468,7 +432,7 @@ esp_err_t WebServer::HandleGetWifi(httpd_req_t* req) {
 
 // {"ssid", "password"}; an empty or missing password means an open network
 esp_err_t WebServer::HandleAddWifi(httpd_req_t* req) {
-    if (!Self(req)->CheckRequest(req)) {
+    if (!Self(req)->CheckAuth(req)) {
         return ESP_OK;
     }
     cJSON* json = ReadJsonBody(req);
@@ -485,7 +449,7 @@ esp_err_t WebServer::HandleAddWifi(httpd_req_t* req) {
 
 // {"ssid", "new_ssid", "password"}; a missing new_ssid / password keeps the current one
 esp_err_t WebServer::HandleUpdateWifi(httpd_req_t* req) {
-    if (!Self(req)->CheckRequest(req)) {
+    if (!Self(req)->CheckAuth(req)) {
         return ESP_OK;
     }
     cJSON* json = ReadJsonBody(req);
@@ -505,7 +469,7 @@ esp_err_t WebServer::HandleUpdateWifi(httpd_req_t* req) {
 
 // {"ssid"}
 esp_err_t WebServer::HandleRemoveWifi(httpd_req_t* req) {
-    if (!Self(req)->CheckRequest(req)) {
+    if (!Self(req)->CheckAuth(req)) {
         return ESP_OK;
     }
     cJSON* json = ReadJsonBody(req);
@@ -521,7 +485,7 @@ esp_err_t WebServer::HandleRemoveWifi(httpd_req_t* req) {
 
 // The request body is the raw application image (build/ancs-esp32.bin)
 esp_err_t WebServer::HandleOta(httpd_req_t* req) {
-    if (!Self(req)->CheckRequest(req)) {
+    if (!Self(req)->CheckAuth(req)) {
         return ESP_OK;
     }
     if (!HasContentType(req, "application/octet-stream")) {

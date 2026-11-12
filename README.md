@@ -115,7 +115,7 @@ Actions  : [] / [清除]
 
 默认没有密码。设置管理密码后浏览器会弹出登录框，用户名 `admin`。已保存的 Webhook Authorization 不会在页面上回显。
 
-为防止其他网站借助浏览器操作设备（CSRF / DNS rebinding），管理后台只接受通过 IP 地址或设备主机名（如 `ancs-a1b2c3.lan`）访问的请求，并拒绝来自其他网站的修改请求；用脚本调用接口时，JSON 请求须带 `Content-Type: application/json`，OTA 须带 `Content-Type: application/octet-stream`。也可在 menuconfig `ANCS-ESP32 Configuration > Admin web page` 中设置默认密码和默认保存条数（页面上修改的值保存在 NVS 中，优先级更高）。
+用脚本调用接口时，JSON 请求须带 `Content-Type: application/json`，OTA 须带 `Content-Type: application/octet-stream`。也可在 menuconfig `ANCS-ESP32 Configuration > Admin web page` 中设置默认密码和默认保存条数（页面上修改的值保存在 NVS 中，优先级更高）。
 
 > 进入配网模式（长按 BOOT 键或页面上的「重新配网」）时管理后台会关闭，因为配网热点的网页使用同一个 80 端口。
 

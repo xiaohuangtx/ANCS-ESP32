@@ -39,9 +39,8 @@ public:
 private:
     WebServer() = default;
 
-    // Host / Origin checks, then the password. Sends the error response and
-    // returns false if the request must not be handled.
-    bool CheckRequest(httpd_req_t* req);
+    // Sends the 401 response and returns false if the password is wrong
+    bool CheckAuth(httpd_req_t* req);
     void SetPassword(const std::string& password);
     bool HasPassword();
     bool ReceiveFirmware(httpd_req_t* req, std::string& error);
