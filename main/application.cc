@@ -9,15 +9,12 @@
 
 #include <esp_log.h>
 #include <esp_app_desc.h>
-#include <esp_heap_caps.h>
 #include <esp_mac.h>
 
 #include <algorithm>
 
 #define TAG "Application"
 
-// Heap statistics interval
-static constexpr int kClockTickSeconds = 60;
 // Notifications remembered to recognize them when iOS replays them
 static constexpr size_t kMaxReportedNotifications = 256;
 // Uploads left pending by a reboot that are sent again; older ones count as
@@ -50,32 +47,15 @@ static std::string MakeDeviceName(const char* prefix) {
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
-
-    esp_timer_create_args_t clock_timer_args = {
-        .callback = [](void* arg) {
-            auto* app = static_cast<Application*>(arg);
-            xEventGroupSetBits(app->event_group_, MAIN_EVENT_CLOCK_TICK);
-        },
-        .arg = this,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "clock_timer",
-        .skip_unhandled_events = true
-    };
-    esp_timer_create(&clock_timer_args, &clock_timer_handle_);
 }
 
 Application::~Application() {
-    if (clock_timer_handle_ != nullptr) {
-        esp_timer_stop(clock_timer_handle_);
-        esp_timer_delete(clock_timer_handle_);
-    }
     vEventGroupDelete(event_group_);
 }
 
 void Application::Initialize() {
     auto app_desc = esp_app_get_description();
     ESP_LOGI(TAG, "%s v%s starting", app_desc->project_name, app_desc->version);
-    PrintHeapStats();
 
     InitializeButtons();
 
@@ -123,19 +103,6 @@ void Application::Initialize() {
         });
     });
     ble.Initialize(MakeDeviceName(CONFIG_BLE_DEVICE_NAME_PREFIX));
-
-    esp_timer_start_periodic(clock_timer_handle_, kClockTickSeconds * 1000000ULL);
-}
-
-void Application::PrintHeapStats() {
-    size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    size_t internal_min = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
-    size_t internal_total = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
-    size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    size_t psram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
-    ESP_LOGI(TAG, "Heap: internal free %u KB (min %u KB) / %u KB, PSRAM free %u KB / %u KB",
-             (unsigned)(internal_free / 1024), (unsigned)(internal_min / 1024), (unsigned)(internal_total / 1024),
-             (unsigned)(psram_free / 1024), (unsigned)(psram_total / 1024));
 }
 
 void Application::InitializeButtons() {
@@ -205,15 +172,10 @@ void Application::OnNotification(const AncsNotification& notification) {
 
 void Application::Run() {
     const EventBits_t ALL_EVENTS =
-        MAIN_EVENT_SCHEDULE |
-        MAIN_EVENT_CLOCK_TICK;
+        MAIN_EVENT_SCHEDULE;
 
     while (true) {
         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
-
-        if (bits & MAIN_EVENT_CLOCK_TICK) {
-            PrintHeapStats();
-        }
 
         if (bits & MAIN_EVENT_SCHEDULE) {
             std::unique_lock<std::mutex> lock(mutex_);

@@ -4,7 +4,6 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <freertos/task.h>
-#include <esp_timer.h>
 
 #include <mutex>
 #include <deque>
@@ -16,7 +15,6 @@
 
 // Main event bits
 #define MAIN_EVENT_SCHEDULE             (1 << 0)
-#define MAIN_EVENT_CLOCK_TICK           (1 << 1)
 
 class Application {
 public:
@@ -53,12 +51,10 @@ private:
     void LoadReportedNotifications();
     void ResendPendingNotifications();
     void OnNotification(const AncsNotification& notification);
-    void PrintHeapStats();
 
     std::mutex mutex_;
     std::deque<std::function<void()>> main_tasks_;
     EventGroupHandle_t event_group_ = nullptr;
-    esp_timer_handle_t clock_timer_handle_ = nullptr;
     std::unique_ptr<Button> boot_button_;
     // Fingerprints of the notifications reported so far, oldest first, also
     // from before the reboot when stored in flash. Only used by the main task.
