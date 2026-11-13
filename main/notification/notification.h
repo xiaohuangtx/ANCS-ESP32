@@ -20,8 +20,8 @@ enum class UploadState : uint8_t {
 const char* UploadStateName(UploadState state);
 
 /**
- * An iOS notification received through ANCS ("added" / "modified" events;
- * "removed" events are consumed internally and never emitted).
+ * An iOS notification received through ANCS. "removed" events only carry the
+ * Notification Source header (has_attributes is false).
  */
 struct AncsNotification {
     uint8_t event_id = 0;        // AncsEventId

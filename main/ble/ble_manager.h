@@ -26,7 +26,7 @@
  */
 class BleManager {
 public:
-    using ConnectionCallback = std::function<void(bool connected, int connection_count)>;
+    using ConnectionCallback = std::function<void(uint16_t conn_handle, bool connected, int connection_count)>;
     // Number of connection slots compiled into NimBLE / the controller
     static constexpr int kMaxConnections = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;
 

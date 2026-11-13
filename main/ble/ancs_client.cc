@@ -559,8 +559,9 @@ void AncsClient::HandleNotificationSource(const uint8_t* data, size_t len) {
     };
 
     if (notification.event_id == kAncsEventRemoved) {
-        // Drop pending fetches only; removals are not forwarded to consumers
+        // Nothing left to fetch; consumers only get the header
         std::erase_if(requests_, is_same_uid);
+        Emit(notification);
         return;
     }
 
