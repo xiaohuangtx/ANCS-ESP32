@@ -10,6 +10,7 @@
 - 完整 ANCS 客户端：服务发现 → 订阅 → 获取通知属性（App、标题、副标题、正文、时间、操作按钮）→ 查询 App 显示名称（带缓存）
 - Data Source 分包重组，Control Point 请求串行队列 + 超时
 - Wi-Fi：保存多个 SSID，无配置或连接超时自动开启配网热点；超时开启的热点在扫描到已保存的 Wi-Fi 且无人连接热点时自动关闭并重连
+- 时钟：iPhone 连接时从它的 Current Time Service 读取时间和时区，连上 Wi-Fi 后用 SNTP 校准
 - Webhook：独立任务 + 队列，Wi-Fi 断开时排队，失败重试，支持 HTTPS（内置证书包）
 - 管理后台：连上 Wi-Fi 后在 `http://<设备IP>/` 提供网页，可查看通知记录（默认保存最近 30 条）、配置 Webhook、上传固件升级（OTA）
 - BOOT 按键：长按进入 Wi-Fi 配网，三击清除 BLE 绑定
@@ -25,6 +26,7 @@ ANCS-ESP32/
     ├── main.cc            # NVS 初始化，启动 Application
     ├── application.cc/h   # 主事件循环、Schedule()、模块组装
     ├── settings.cc/h      # NVS 封装
+    ├── time_sync.cc/h     # 时钟：iPhone Current Time Service + SNTP，时区
     ├── Kconfig.projbuild  # menuconfig 配置项
     ├── idf_component.yml  # 依赖：espressif/button、espressif/cjson
     ├── ble/
@@ -77,7 +79,7 @@ Flash 较小的板子可在 menuconfig 中把 `Partition Table > Custom partitio
 - 每条通知约 0.25 次扇区擦除（正文 512 字节时一条最大约 1KB）。按 NOR Flash 每扇区 10 万次擦写估算：每天 1000 条可用数百年；即使每秒 1 条、24 小时不停，也能用约 6 年
 - 管理后台显示最近的若干条（默认 30，最多 100）；更早的记录仍留在 Flash 中，直到被循环覆盖。「清空」只是让已有记录不再显示（NVS namespace `history`，key `cleared`），不会擦除 Flash
 - 重启前还没上传完成的通知，开机后会重新发送（最多 `CONFIG_WEBHOOK_QUEUE_SIZE / 2` 条最新的，更早的记为上传失败）。如果断电时请求已经到达服务器、但还没收到响应，这条通知会被重复发送
-- 设备没有校准时钟，所以重启前收到的记录在页面上显示为「重启前」，通知本身的时间以 iOS 提供的 `date` 为准
+- 每条记录保存收到时的时间（时钟已校准时，见[时钟](#时钟)）。时钟校准之前收到、又经过了重启的记录，在页面上显示为「重启前」；通知本身的时间以 iOS 提供的 `date` 为准
 
 ## 使用
 
@@ -106,7 +108,7 @@ Actions  : [] / [清除]
 
 设备连上 Wi-Fi 后，串口会打印 `Admin page: http://192.168.x.x/`，用同一局域网内的电脑或手机浏览器打开即可：
 
-- **概览**：蓝牙名称（`ANCS-XXXXXX`，页面标题也会显示，方便区分多块板子）、固件版本、IP、Wi-Fi 信号、蓝牙连接数、内存
+- **概览**：蓝牙名称（`ANCS-XXXXXX`，页面标题也会显示，方便区分多块板子）、固件版本、设备时间和校准来源、IP、Wi-Fi 信号、蓝牙连接数、内存
 - **通知记录**：列表中正文最多显示 3 行，点击任意一条弹出完整内容和详情（App ID、来源设备、操作按钮等）。最近收到的通知（默认 30 条，可在「设置」中改为 1–100 条）。同一条通知的 `modified` 事件会覆盖之前的记录。等待上传和上传失败的通知会有标记。有 `storage` 分区时记录保存在 Flash 中（见[通知记录持久化](#通知记录持久化)），否则重启后清空
   - 实时更新：页面通过 WebSocket（`/api/events`）接收设备的变化信号，新通知、上传状态、操作按钮变化立即显示，标题栏右侧显示「实时」。连接断开时自动重连，期间通知记录页每 5 秒轮询。每个打开的页面占用设备的 1 个 HTTP 连接（共 5 个）
   - 新通知会在右上角弹出（在任意标签页），8 秒后消失；来电会一直显示，直到接听、拒绝或结束
@@ -181,6 +183,17 @@ URL 为空时 Webhook 关闭。配置来源（优先级从高到低）：
 `message` 最多 `CONFIG_ANCS_MAX_MESSAGE_LEN`（默认 512）字节，更长的内容 iOS 不会发送，此时 `message_truncated` 为 `true`、`message_size` 为原始长度。返回 2xx 视为成功；网络错误或 5xx 最多重试 3 次；4xx 不重试。重试期间 Wi-Fi 断开时会等待重新连上再发送，这种失败不计入重试次数。
 
 连接会复用（HTTP keep-alive）：连续多条通知只需建立一次连接 / TLS 握手；空闲 30 秒、修改 URL 或 Wi-Fi 断开后关闭。复用的连接已被服务器关闭时会立即重连重发，不计入重试次数。
+
+## 时钟
+
+设备从两个来源校准时钟（`TimeSync`）：
+
+- **iPhone**：iOS 向已配对的设备提供 Current Time Service。每次连接时读取 iPhone 的当前时间和时区（含夏令时），不需要 Wi-Fi。时区保存在 NVS（namespace `time`，key `utc_off`），重启后沿用；在此之前使用 menuconfig `ANCS-ESP32 Configuration > Time > Default UTC offset`（默认 UTC+8）
+- **SNTP**：连上 Wi-Fi 后启动，默认服务器 `ntp.aliyun.com` 和 `pool.ntp.org`（menuconfig 中可修改或关闭），每小时同步一次。SNTP 最近 2 小时内同步过时，iPhone 只用来更新时区
+
+校准后通知记录带有收到时间（页面上显示为具体时间）。概览页显示设备时间和最近一次校准的来源。
+
+> 第二个 SNTP 服务器需要 `CONFIG_LWIP_SNTP_MAX_SERVERS=2`（已写入 `sdkconfig.defaults`）。之前编译过的工程须删除 `sdkconfig` 后重新生成才会生效，否则只使用第一个服务器。
 
 ## 扩展
 

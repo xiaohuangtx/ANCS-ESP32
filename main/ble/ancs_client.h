@@ -20,8 +20,9 @@
  *
  * The iPhone is the GATT server (Notification Provider), the ESP32 is the
  * GATT client (Notification Consumer). Flow:
- *   1. Link encrypted -> read the peer's device name -> discover ANCS
- *      service and its 3 characteristics
+ *   1. Link encrypted -> read the peer's device name and current time (Current
+ *      Time Service, handed to TimeSync) -> discover ANCS service and its 3
+ *      characteristics
  *   2. Subscribe Data Source, then Notification Source
  *   3. Notification Source event -> write Get Notification Attributes to the
  *      Control Point -> reassemble the response from Data Source
@@ -61,6 +62,8 @@ private:
     enum class State {
         kIdle,
         kReadingPeerName,
+        kReadingCurrentTime,
+        kReadingLocalTimeInfo,
         kDiscoveringService,
         kDiscoveringCharacteristics,
         kDiscoveringDescriptors,
@@ -85,6 +88,8 @@ private:
     // Discovery
     void StartDiscovery();
     void ReadPeerName();
+    void ReadTime(State state);
+    void OnPeerInfoRead();
     void DiscoverService();
     void ScheduleRetry();
     void DiscoverDescriptors(uint16_t val_handle);
@@ -92,6 +97,7 @@ private:
     uint16_t GetCharacteristicEndHandle(uint16_t val_handle) const;
 
     int HandlePeerNameRead(const struct ble_gatt_error* error, struct ble_gatt_attr* attr);
+    int HandleTimeRead(const struct ble_gatt_error* error, struct ble_gatt_attr* attr);
     int HandleServiceDiscovered(const struct ble_gatt_error* error, const struct ble_gatt_svc* service);
     int HandleCharacteristicDiscovered(const struct ble_gatt_error* error, const struct ble_gatt_chr* chr);
     int HandleDescriptorDiscovered(const struct ble_gatt_error* error, uint16_t chr_val_handle, const struct ble_gatt_dsc* dsc);
@@ -123,6 +129,8 @@ private:
                                       uint16_t chr_val_handle, const struct ble_gatt_dsc* dsc, void* arg);
     static int OnPeerNameRead(uint16_t conn_handle, const struct ble_gatt_error* error,
                               struct ble_gatt_attr* attr, void* arg);
+    static int OnTimeRead(uint16_t conn_handle, const struct ble_gatt_error* error,
+                          struct ble_gatt_attr* attr, void* arg);
     static int OnCccdWritten(uint16_t conn_handle, const struct ble_gatt_error* error,
                              struct ble_gatt_attr* attr, void* arg);
     static int OnControlPointWritten(uint16_t conn_handle, const struct ble_gatt_error* error,
@@ -136,6 +144,10 @@ private:
     uint16_t conn_handle_ = BLE_HS_CONN_HANDLE_NONE;
     std::string peer_name_;
     std::string peer_address_;
+    // Current Time Service, read once per connection
+    bool time_read_ = false;
+    std::string current_time_;
+    std::string local_time_info_;
 
     // GATT handles
     uint16_t service_start_handle_ = 0;

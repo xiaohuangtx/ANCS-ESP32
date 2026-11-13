@@ -1,4 +1,5 @@
 #include "ancs_client.h"
+#include "time_sync.h"
 
 #include <esp_log.h>
 #include <nimble/nimble_port.h>
@@ -24,6 +25,9 @@ static const ble_uuid128_t kDataSourceUuid = BLE_UUID128_INIT(
 static const ble_uuid16_t kCccdUuid = BLE_UUID16_INIT(BLE_GATT_DSC_CLT_CFG_UUID16);
 // GAP Device Name of the peer, e.g. "John's iPhone"
 static const ble_uuid16_t kDeviceNameUuid = BLE_UUID16_INIT(BLE_SVC_GAP_CHR_UUID16_DEVICE_NAME);
+// Current Time Service (0x1805), offered by iOS to bonded devices
+static const ble_uuid16_t kCurrentTimeUuid = BLE_UUID16_INIT(0x2A2B);
+static const ble_uuid16_t kLocalTimeInfoUuid = BLE_UUID16_INIT(0x2A0F);
 
 // Attributes requested for every notification, in this order
 struct RequestedAttribute {
@@ -133,6 +137,9 @@ void AncsClient::ResetConnectionState() {
     data_buffer_.clear();
     peer_name_.clear();
     peer_address_.clear();
+    time_read_ = false;
+    current_time_.clear();
+    local_time_info_.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +162,7 @@ void AncsClient::StartDiscovery() {
     if (peer_name_.empty()) {
         ReadPeerName();
     } else {
-        DiscoverService();
+        OnPeerInfoRead();
     }
 }
 
@@ -164,7 +171,7 @@ void AncsClient::ReadPeerName() {
     int rc = ble_gattc_read_by_uuid(conn_handle_, 1, 0xffff, &kDeviceNameUuid.u, OnPeerNameRead, this);
     if (rc != 0) {
         ESP_LOGW(TAG, "Failed to read peer name, rc=%d", rc);
-        DiscoverService();
+        OnPeerInfoRead();
     }
 }
 
@@ -180,6 +187,52 @@ int AncsClient::HandlePeerNameRead(const struct ble_gatt_error* error, struct bl
         ESP_LOGW(TAG, "Failed to read peer name, status=%d", error->status);
     }
     ESP_LOGI(TAG, "conn=%d peer \"%s\" (%s)", conn_handle_, peer_name_.c_str(), peer_address_.c_str());
+    OnPeerInfoRead();
+    return 0;
+}
+
+// Next step after the peer name: the current time once per connection (not on
+// the retries while "Share System Notifications" is off), then ANCS
+void AncsClient::OnPeerInfoRead() {
+    if (time_read_) {
+        DiscoverService();
+        return;
+    }
+    time_read_ = true;
+    ReadTime(State::kReadingCurrentTime);
+}
+
+void AncsClient::ReadTime(State state) {
+    state_ = state;
+    auto* uuid = state == State::kReadingCurrentTime ? &kCurrentTimeUuid.u : &kLocalTimeInfoUuid.u;
+    int rc = ble_gattc_read_by_uuid(conn_handle_, 1, 0xffff, uuid, OnTimeRead, this);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "Failed to read current time, rc=%d", rc);
+        DiscoverService();
+    }
+}
+
+int AncsClient::HandleTimeRead(const struct ble_gatt_error* error, struct ble_gatt_attr* attr) {
+    bool current_time = state_ == State::kReadingCurrentTime;
+    if (error->status == 0 && attr != nullptr) {
+        uint8_t value[16];
+        uint16_t len = std::min<uint16_t>(OS_MBUF_PKTLEN(attr->om), sizeof(value));
+        os_mbuf_copydata(attr->om, 0, len, value);
+        (current_time ? current_time_ : local_time_info_).assign(reinterpret_cast<char*>(value), len);
+        return 0;
+    }
+    if (error->status != BLE_HS_EDONE) {
+        // e.g. attribute not found: an iPad without the service, or not iOS
+        ESP_LOGI(TAG, "conn=%d %s not available, status=%d", conn_handle_,
+                 current_time ? "Current Time" : "Local Time Information", error->status);
+    }
+    if (current_time && !current_time_.empty()) {
+        ReadTime(State::kReadingLocalTimeInfo);
+        return 0;
+    }
+    if (!current_time_.empty()) {
+        TimeSync::GetInstance().OnIphoneTime(current_time_, local_time_info_, peer_name_);
+    }
     DiscoverService();
     return 0;
 }
@@ -779,6 +832,15 @@ int AncsClient::OnPeerNameRead(uint16_t conn_handle, const struct ble_gatt_error
         return 0;  // Stale procedure from a previous connection
     }
     return self->HandlePeerNameRead(error, attr);
+}
+
+int AncsClient::OnTimeRead(uint16_t conn_handle, const struct ble_gatt_error* error,
+                           struct ble_gatt_attr* attr, void* arg) {
+    auto* self = static_cast<AncsClient*>(arg);
+    if (conn_handle != self->conn_handle_) {
+        return 0;  // Stale procedure from a previous connection
+    }
+    return self->HandleTimeRead(error, attr);
 }
 
 int AncsClient::OnCccdWritten(uint16_t conn_handle, const struct ble_gatt_error* error,

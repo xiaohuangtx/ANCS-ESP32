@@ -65,7 +65,8 @@ public:
     // JSON array, newest first. Each item is AncsNotification::ToCJson() plus
     // "id", "upload" (UploadStateName), "active" and "received_ago" (seconds
     // since it was received, missing when received before a reboot without a
-    // set clock).
+    // set clock) and "received_time" (Unix time, missing while the clock is
+    // not set).
     // The caller owns it.
     cJSON* ToCJson();
 

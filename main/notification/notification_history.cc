@@ -219,10 +219,22 @@ cJSON* NotificationHistory::ToCJson() {
         cJSON_AddNumberToObject(item, "id", entry.id);
         cJSON_AddStringToObject(item, "upload", UploadStateName(entry.upload_state));
         cJSON_AddBoolToObject(item, "active", entry.active);
+        int64_t ago = -1;
         if (entry.received_us >= 0) {
-            cJSON_AddNumberToObject(item, "received_ago", (double)((now_us - entry.received_us) / 1000000));
+            ago = (now_us - entry.received_us) / 1000000;
         } else if (entry.received_time != 0 && now != 0) {
-            cJSON_AddNumberToObject(item, "received_ago", (double)std::max<time_t>(0, now - entry.received_time));
+            ago = std::max<time_t>(0, now - entry.received_time);
+        }
+        if (ago >= 0) {
+            cJSON_AddNumberToObject(item, "received_ago", (double)ago);
+        }
+        // Wall clock, also for entries received before the clock was set
+        time_t received_time = entry.received_time;
+        if (received_time == 0 && ago >= 0 && now != 0) {
+            received_time = now - ago;
+        }
+        if (received_time != 0) {
+            cJSON_AddNumberToObject(item, "received_time", (double)received_time);
         }
         cJSON_AddItemToArray(array, item);
     }

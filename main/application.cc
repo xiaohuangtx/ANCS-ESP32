@@ -4,6 +4,7 @@
 #include "webhook_client.h"
 #include "notification_history.h"
 #include "notification_store.h"
+#include "time_sync.h"
 #include "web_server.h"
 #include "ancs_defs.h"
 
@@ -57,6 +58,8 @@ void Application::Initialize() {
     auto app_desc = esp_app_get_description();
     ESP_LOGI(TAG, "%s v%s starting", app_desc->project_name, app_desc->version);
 
+    // Before anything formats a local time
+    TimeSync::GetInstance().Initialize();
     InitializeButtons();
 
     // Reload what survived the reboot, so a replay of Notification Center
@@ -84,6 +87,7 @@ void Application::Initialize() {
         // handled together in the main loop would not guarantee.
         if (event == NetworkEvent::Connected) {
             WebServer::GetInstance().Start();
+            TimeSync::GetInstance().StartNtp();
             WebhookClient::GetInstance().SetNetworkReady(true);
         } else if (event == NetworkEvent::Disconnected) {
             WebServer::GetInstance().Stop();

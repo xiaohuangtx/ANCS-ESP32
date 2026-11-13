@@ -90,6 +90,38 @@ config WEBHOOK_QUEUE_SIZE
 
 endmenu
 
+menu "Time"
+
+config TIME_DEFAULT_UTC_OFFSET
+    int "Default UTC offset (minutes)"
+    range -720 840
+    default 480
+    help
+        Time zone used until an iPhone has reported its own (Current Time
+        Service), e.g. 480 for UTC+8. The offset reported by the iPhone is
+        stored in NVS (namespace "time", key "utc_off") and takes precedence.
+
+config TIME_SYNC_NTP
+    bool "Sync the clock with SNTP"
+    default y
+    help
+        While Wi-Fi is connected. Without it, the clock is only set from the
+        iPhone when it connects.
+
+config TIME_NTP_SERVER
+    string "SNTP server"
+    default "ntp.aliyun.com"
+    depends on TIME_SYNC_NTP
+
+config TIME_NTP_SERVER_2
+    string "Second SNTP server"
+    default "pool.ntp.org"
+    depends on TIME_SYNC_NTP
+    help
+        Needs LWIP_SNTP_MAX_SERVERS >= 2. Leave empty to use one server only.
+
+endmenu
+
 menu "Admin web page"
 
 config NOTIFICATION_HISTORY_SIZE

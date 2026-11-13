@@ -5,6 +5,7 @@
 #include "webhook_client.h"
 #include "notification_history.h"
 #include "notification_store.h"
+#include "time_sync.h"
 #include "log_buffer.h"
 #include "settings.h"
 #include "http_utils.h"
@@ -287,6 +288,16 @@ esp_err_t WebServer::HandleStatus(httpd_req_t* req) {
     cJSON_AddNumberToObject(json, "notification_count", history.GetCount());
     cJSON_AddNumberToObject(json, "history_size", history.GetCapacity());
     cJSON_AddBoolToObject(json, "webhook_enabled", WebhookClient::GetInstance().IsEnabled());
+
+    auto time_status = TimeSync::GetInstance().GetStatus();
+    cJSON* time_json = cJSON_AddObjectToObject(json, "time");
+    cJSON_AddBoolToObject(time_json, "set", TimeSync::IsClockSet());
+    cJSON_AddNumberToObject(time_json, "now", (double)time(nullptr));
+    cJSON_AddStringToObject(time_json, "source", TimeSourceName(time_status.source));
+    cJSON_AddNumberToObject(time_json, "last_sync", (double)time_status.last_sync);
+    cJSON_AddNumberToObject(time_json, "utc_offset", time_status.utc_offset);
+    cJSON_AddBoolToObject(time_json, "offset_from_iphone", time_status.offset_from_iphone);
+
 
     cJSON* diag_json = cJSON_AddObjectToObject(json, "diag");
     cJSON_AddStringToObject(diag_json, "reset_reason", ResetReasonName(esp_reset_reason()));

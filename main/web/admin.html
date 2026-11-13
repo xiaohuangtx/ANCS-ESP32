@@ -244,6 +244,19 @@ function ago(s) {
   if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
   return Math.floor(s / 86400) + ' 天前';
 }
+function pad(n) { return String(n).padStart(2, '0'); }
+function utcOffset(m) { return 'UTC' + (m >= 0 ? '+' : '-') + Math.floor(Math.abs(m) / 60) + (Math.abs(m) % 60 ? ':' + pad(Math.abs(m) % 60) : ''); }
+// In the device's time zone, which may differ from the browser's
+function deviceTime(t) {
+  if (!t || !t.set) return '未校准';
+  const d = new Date((t.now + t.utc_offset * 60) * 1000);
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}（${utcOffset(t.utc_offset)}）`;
+}
+const TIME_SOURCE = { ntp:'网络（SNTP）', iphone:'iPhone' };
+function timeSource(t) {
+  if (!t || !t.last_sync) return t && t.set ? '重启前已校准' : '等待 iPhone 连接或 Wi-Fi 联网';
+  return (TIME_SOURCE[t.source] || t.source) + '，' + ago(Math.max(0, t.now - t.last_sync)) + (t.offset_from_iphone ? '' : '，时区为默认值');
+}
 function rssi(v) { return v ? v + ' dBm' + (v > -60 ? '（强）' : v > -75 ? '（中）' : '（弱）') : '-'; }
 
 function switchTab(name) {
@@ -267,7 +280,8 @@ async function loadStatus() {
   $('hdrver').textContent = 'v' + s.version;
   if (s.ble.name) { $('devname').textContent = s.ble.name; document.title = s.ble.name + ' 管理后台'; }
   $('dev').innerHTML = kv([['固件版本', s.version], ['编译时间', s.build_time], ['ESP-IDF', s.idf_version],
-    ['芯片', s.chip], ['MAC', s.mac], ['运行时间', duration(s.uptime)]]);
+    ['芯片', s.chip], ['MAC', s.mac], ['运行时间', duration(s.uptime)],
+    ['设备时间', deviceTime(s.time)], ['时间来源', timeSource(s.time)]]);
   $('net').innerHTML = kv([['蓝牙名称', s.ble.name || '-'], ['Wi-Fi', s.wifi.ssid || '-'], ['IP 地址', s.wifi.ip || '-'], ['信号', rssi(s.wifi.rssi)],
     ['蓝牙连接', s.ble.connections + ' / ' + s.ble.max_connections], ['Webhook', s.webhook_enabled ? '已开启' : '未配置'],
     ['通知记录', s.notification_count + ' / ' + s.history_size]]);
@@ -515,10 +529,15 @@ function renderNotification(n) {
     <div class="body">${n.message ? esc(n.message) : '<span style="color:var(--muted)">（无内容）</span>'}</div>
     ${n.message_truncated ? `<div class="warn">内容已被 iOS 截断：设备每条通知最多获取 ${maxMessageLen} 字节（原始长度 ${n.message_size}），超出部分没有发送到设备，无法显示。</div>` : ''}
     <div id="mactions">${actionButtons(n)}</div>
-    <div class="grid">${kv([['时间', n.date ? n.date.replace('T', ' ') : '-'], ['收到', ago(n.received_ago)],
+    <div class="grid">${kv([['时间', n.date ? n.date.replace('T', ' ') : '-'], ['收到', receivedAt(n)],
       ['来自设备', (n.peer_name || '-') + (n.peer_address ? ' (' + n.peer_address + ')' : '')], ['App ID', n.app_id || '-'],
       ['分类', (CATEGORY[n.category] || n.category) + (n.category_count > 1 ? `（共 ${n.category_count} 条）` : '')],
       ['操作按钮', actions || '-'], ['标记', flags || '-'], ['Webhook', UPLOAD[n.upload] || '-'], ['UID', n.uid]])}</div>`;
+}
+function receivedAt(n) {
+  if (!n.received_time) return ago(n.received_ago);
+  const d = new Date(n.received_time * 1000);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}（${ago(n.received_ago)}）`;
 }
 function closeNotification() { $('nmodal').classList.remove('open'); openKey = null; }
 $('mclose').onclick = closeNotification;
