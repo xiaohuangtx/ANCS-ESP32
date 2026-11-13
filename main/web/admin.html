@@ -27,8 +27,9 @@ section.active { display:block; }
 .group + .group { margin-top:16px; padding-top:14px; border-top:1px solid var(--line); }
 .group h3 { margin:0 0 10px; font-size:13px; font-weight:600; color:var(--muted); }
 label { display:block; margin:12px 0 4px; color:var(--muted); font-size:13px; }
-input[type=text],input[type=password],input[type=number],input[type=url] { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; font-size:14px; }
-input:focus { outline:none; border-color:var(--primary); }
+input[type=text],input[type=password],input[type=number],input[type=url],textarea,select { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; font-size:14px; font-family:inherit; background:#fff; }
+textarea { resize:vertical; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
+input:focus,textarea:focus,select:focus { outline:none; border-color:var(--primary); }
 .hint { color:var(--muted); font-size:12px; margin-top:4px; }
 button { padding:7px 16px; border-radius:6px; border:1px solid var(--line); background:#fff; cursor:pointer; font-size:14px; }
 button.primary { background:var(--primary); border-color:var(--primary); color:#fff; }
@@ -70,11 +71,13 @@ button:disabled { opacity:.5; cursor:not-allowed; }
 .file { border:1px dashed var(--line); border-radius:8px; padding:20px; text-align:center; cursor:pointer; color:var(--muted); }
 .file:hover { border-color:var(--primary); }
 .file input { display:none; }
-.wifi { display:flex; align-items:center; gap:8px; flex-wrap:wrap; border-top:1px solid var(--line); padding:10px 0; }
-.wifi:first-of-type { border-top:none; }
-.wifi .name { font-weight:600; word-break:break-all; }
-.wifi .ops { margin-left:auto; display:flex; gap:8px; }
-.wifi .ops button { padding:4px 12px; font-size:13px; }
+.wifi, .row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; border-top:1px solid var(--line); padding:10px 0; }
+.wifi:first-of-type, .row:first-of-type { border-top:none; }
+.wifi .name, .row .name { font-weight:600; word-break:break-all; }
+.wifi .ops, .row .ops { margin-left:auto; display:flex; gap:8px; }
+.wifi .ops button, .row .ops button { padding:4px 12px; font-size:13px; }
+.row .desc { flex-basis:100%; color:var(--muted); font-size:12px; word-break:break-all; }
+.row.off .name { color:var(--muted); text-decoration:line-through; }
 .check { display:flex; align-items:center; gap:6px; margin-top:8px; color:var(--muted); font-size:13px; }
 header .live { margin-left:auto; color:#aab; font-size:12px; }
 header .live::before { content:''; display:inline-block; width:8px; height:8px; border-radius:50%; background:#667; margin-right:6px; }
@@ -121,13 +124,21 @@ header .live.on::before { background:var(--ok); }
 
 <section id="settings">
   <div class="card">
-    <h2>Webhook</h2>
-    <label>URL（留空则关闭）</label>
-    <input type="url" id="whurl" placeholder="https://example.com/ancs">
-    <label>Authorization 请求头（可选）</label>
-    <input type="text" id="whauth" placeholder="Bearer xxxxxx" autocomplete="off">
-    <div class="hint">每条通知以 JSON 格式 POST 到该地址。测试会先保存再发送一条 event 为 "test" 的示例通知。已保存的 Authorization 不会显示，留空保存则保持不变。</div>
-    <div class="actions"><button class="primary" id="whsave">保存</button><button id="whtest">保存并测试</button><button class="danger" id="whauthclear">清除 Authorization</button><span class="msg" id="whmsg"></span></div>
+    <h2>推送目标 <span class="badge gray" id="tcount"></span><span class="spacer"></span><button id="tadd">添加</button></h2>
+    <div id="tlist"><div class="empty">加载中…</div></div>
+    <div class="hint">通知会推送到所有已启用的目标。支持原始 JSON、企业微信、钉钉、飞书、Bark、ntfy、Server酱、Telegram，以及自定义 JSON 模板。</div>
+    <div class="actions"><span class="msg" id="tlistmsg"></span></div>
+  </div>
+  <div class="card" id="tform" style="display:none">
+    <h2 id="tformtitle">添加推送目标</h2>
+    <label>名称</label><input type="text" id="tname" maxlength="32" placeholder="例如：企业微信群">
+    <label>格式</label><select id="tformat"></select>
+    <label>URL</label><input type="url" id="turl" autocomplete="off">
+    <div class="hint" id="turlhint"></div>
+    <div id="tsecretrow"><label id="tsecretlabel"></label><input type="text" id="tsecret" autocomplete="off"><div class="hint" id="tsecrethint"></div></div>
+    <div id="ttmplrow"><label id="ttmpllabel"></label><textarea id="ttmpl" rows="4"></textarea><div class="hint" id="ttmplhint"></div></div>
+    <label class="check"><input type="checkbox" id="tenabled" checked> 启用</label>
+    <div class="actions"><button class="primary" id="tsave">保存</button><button id="ttest">保存并测试</button><button id="tcancel">取消</button><button class="danger" id="tsecretclear">清除已保存的密钥</button><span class="msg" id="tmsg"></span></div>
   </div>
   <div class="card">
     <h2>蓝牙</h2>
@@ -283,7 +294,7 @@ async function loadStatus() {
     ['芯片', s.chip], ['MAC', s.mac], ['运行时间', duration(s.uptime)],
     ['设备时间', deviceTime(s.time)], ['时间来源', timeSource(s.time)]]);
   $('net').innerHTML = kv([['蓝牙名称', s.ble.name || '-'], ['Wi-Fi', s.wifi.ssid || '-'], ['IP 地址', s.wifi.ip || '-'], ['信号', rssi(s.wifi.rssi)],
-    ['蓝牙连接', s.ble.connections + ' / ' + s.ble.max_connections], ['Webhook', s.webhook_enabled ? '已开启' : '未配置'],
+    ['蓝牙连接', s.ble.connections + ' / ' + s.ble.max_connections], ['推送目标', s.webhook_targets ? s.webhook_targets + ' 个已启用' : '未配置'],
     ['通知记录', s.notification_count + ' / ' + s.history_size]]);
   const mem = [['内部 RAM 可用', kb(s.heap.internal_free) + ' / ' + kb(s.heap.internal_total)], ['内部 RAM 最低', kb(s.heap.internal_min)]];
   if (s.heap.psram_total) mem.push(['PSRAM 可用', kb(s.heap.psram_free) + ' / ' + kb(s.heap.psram_total)]);
@@ -420,15 +431,15 @@ function renderNotifications(data) {
   });
 }
 let notifications = [], maxMessageLen = 0;
-const UPLOAD = { pending:'等待上传', delivered:'已上传', failed:'上传失败', skipped:'未配置，未上传' };
+const UPLOAD = { pending:'等待推送', delivered:'已推送', failed:'推送失败', skipped:'未推送（没有推送目标）' };
 function appName(n) { return n.app_name || n.app_id || '未知应用'; }
 function badges(n) {
   const b = [`<span class="badge">${esc(CATEGORY[n.category] || n.category)}</span>`];
   if (n.event === 'modified') b.push('<span class="badge gray">已更新</span>');
   if (n.flags.important) b.push('<span class="badge red">重要</span>');
   if (n.flags.pre_existing) b.push('<span class="badge gray">历史</span>');
-  if (n.upload === 'pending') b.push('<span class="badge gray">待上传</span>');
-  if (n.upload === 'failed') b.push('<span class="badge red">上传失败</span>');
+  if (n.upload === 'pending') b.push('<span class="badge gray">待推送</span>');
+  if (n.upload === 'failed') b.push('<span class="badge red">推送失败</span>');
   return b.join(' ');
 }
 // Same notification across "modified" events, which give it a new id
@@ -532,7 +543,8 @@ function renderNotification(n) {
     <div class="grid">${kv([['时间', n.date ? n.date.replace('T', ' ') : '-'], ['收到', receivedAt(n)],
       ['来自设备', (n.peer_name || '-') + (n.peer_address ? ' (' + n.peer_address + ')' : '')], ['App ID', n.app_id || '-'],
       ['分类', (CATEGORY[n.category] || n.category) + (n.category_count > 1 ? `（共 ${n.category_count} 条）` : '')],
-      ['操作按钮', actions || '-'], ['标记', flags || '-'], ['Webhook', UPLOAD[n.upload] || '-'], ['UID', n.uid]])}</div>`;
+      ['操作按钮', actions || '-'], ['标记', flags || '-'], ['推送', UPLOAD[n.upload] || '-'], ['UID', n.uid]])}</div>
+`;
 }
 function receivedAt(n) {
   if (!n.received_time) return ago(n.received_ago);
@@ -553,10 +565,6 @@ $('nclear').onclick = async () => {
 async function loadConfig() {
   let c;
   try { c = await api('/api/config'); } catch (e) { return; }
-  $('whurl').value = c.webhook_url;
-  $('whauth').value = '';
-  $('whauth').placeholder = c.has_webhook_auth ? '已设置（留空保持不变）' : 'Bearer xxxxxx';
-  $('whauthclear').style.display = c.has_webhook_auth ? '' : 'none';
   $('hsize').value = c.history_size;
   $('hsize').min = c.history_size_min; $('hsize').max = c.history_size_max;
   $('hsizehint').textContent = `范围 ${c.history_size_min}–${c.history_size_max}。` +
@@ -567,32 +575,143 @@ async function loadConfig() {
   $('pwstate').textContent = c.has_password ? '已设置' : '未设置';
   $('pwstate').className = 'badge' + (c.has_password ? '' : ' gray');
   $('pwclear').style.display = c.has_password ? '' : 'none';
+  await loadTargets();
 }
-async function saveWebhook() {
-  const body = { webhook_url: $('whurl').value.trim() };
-  const auth = $('whauth').value.trim();
-  if (auth) body.webhook_auth = auth;
-  await postJson('/api/config', body);
-  if (auth) loadConfig();
+
+// ---- Push targets
+// secret: label of the secret field (null: not used), tmpl: label of the template (null: not used)
+const FORMATS = {
+  json: { label:'JSON（原始通知）', url:'https://example.com/ancs', secret:'Authorization 请求头（可选）', secretPh:'Bearer xxxxxx', tmpl:null,
+    hint:'每条通知以 JSON 格式 POST 到该地址，字段见 README。测试通知的 event 为 "test"。' },
+  wecom: { label:'企业微信群机器人', url:'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…', secret:null, tmpl:'消息模板',
+    hint:'在群聊中「添加群机器人」，复制它的 Webhook 地址。每个机器人每分钟最多发送 20 条。' },
+  dingtalk: { label:'钉钉群机器人', url:'https://oapi.dingtalk.com/robot/send?access_token=…', secret:'加签密钥（可选，SEC 开头）', secretPh:'SEC…', tmpl:'消息模板',
+    hint:'在群设置中添加「自定义」机器人，复制 Webhook 地址。安全设置选「加签」时填写密钥（需要设备时间准确）；选「自定义关键词」时消息模板中须包含该关键词。' },
+  feishu: { label:'飞书群机器人', url:'https://open.feishu.cn/open-apis/bot/v2/hook/…', secret:'签名校验密钥（可选）', tmpl:'消息模板',
+    hint:'在群设置中添加「自定义机器人」，复制 Webhook 地址。开启「签名校验」时填写密钥（需要设备时间准确）。' },
+  bark: { label:'Bark', url:'https://api.day.app/你的 Key', secret:null, tmpl:'消息模板（第一行为标题）',
+    hint:'填写 Bark App 中显示的服务器地址加 Key，例如 https://api.day.app/xxxxxx，后面不要带示例文字。' },
+  ntfy: { label:'ntfy', url:'https://ntfy.sh/你的主题', secret:'Authorization 请求头（可选）', secretPh:'Bearer tk_…', tmpl:'消息模板（第一行为标题）',
+    hint:'服务器地址加主题名称；自建服务器开启了访问控制时填写 Authorization。' },
+  serverchan: { label:'Server酱', url:'https://sctapi.ftqq.com/你的 SendKey.send', secret:null, tmpl:'消息模板（第一行为标题）',
+    hint:'在 Server酱 网站获取 SendKey。' },
+  telegram: { label:'Telegram Bot', url:'https://api.telegram.org/bot<Token>/sendMessage', secret:'Chat ID（必填）', secretPh:'123456789', tmpl:'消息模板',
+    hint:'用 @BotFather 创建机器人得到 Token。Chat ID 是接收消息的用户或群组的 ID。' },
+  custom: { label:'自定义 JSON', url:'https://example.com/hook', secret:'Authorization 请求头（可选）', secretPh:'Bearer xxxxxx', tmpl:'请求体模板（JSON）',
+    tmplPh:'{"text": "{{app}}：{{title}}\\n{{message}}"}', hint:'按模板生成 JSON 请求体 POST 到该地址。' },
+};
+const PLACEHOLDERS = '可用占位符：{{app}} {{app_id}} {{title}} {{subtitle}} {{message}} {{category}} {{device}} {{date}} {{event}} {{uid}} {{positive_action}} {{negative_action}}。';
+$('tformat').innerHTML = Object.entries(FORMATS).map(([k, f]) => `<option value="${k}">${f.label}</option>`).join('');
+
+let targets = [], targetsMax = 3, defaultTemplate = '', targetEditing = -1;
+async function loadTargets() {
+  let data;
+  try { data = await api('/api/webhooks'); } catch (e) { $('tlist').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  targets = data.items; targetsMax = data.max; defaultTemplate = data.default_template;
+  const used = targets.filter(Boolean).length;
+  $('tcount').textContent = used + ' / ' + targetsMax;
+  $('tadd').style.display = used < targetsMax ? '' : 'none';
+  $('tlist').innerHTML = used ? targets.map((t, i) => !t ? '' : `<div class="row${t.enabled ? '' : ' off'}">
+      <span class="name">${esc(t.name)}</span><span class="badge">${esc((FORMATS[t.format] || {}).label || t.format)}</span>
+      ${t.enabled ? '' : '<span class="badge gray">已停用</span>'}
+      <span class="ops"><button data-ttest="${i}">测试</button><button data-tedit="${i}">编辑</button><button class="danger" data-tdel="${i}">删除</button></span>
+      <div class="desc">${esc(t.url)}</div></div>`).join('')
+    : '<div class="empty">还没有推送目标，通知只保存在本设备</div>';
+  $('tlist').querySelectorAll('[data-tedit]').forEach(b => b.onclick = () => openTargetForm(Number(b.dataset.tedit)));
+  $('tlist').querySelectorAll('[data-tdel]').forEach(b => b.onclick = () => removeTarget(Number(b.dataset.tdel)));
+  $('tlist').querySelectorAll('[data-ttest]').forEach(b => b.onclick = async () => {
+    b.disabled = true; show('tlistmsg', '发送中…', true);
+    await testTarget(Number(b.dataset.ttest), 'tlistmsg');
+    b.disabled = false;
+  });
 }
-$('whsave').onclick = async () => {
-  try { await saveWebhook(); show('whmsg', '已保存', true); } catch (e) { show('whmsg', e.message); }
+function targetName(i) { return targets[i] ? targets[i].name : `推送 ${i + 1}（已删除）`; }
+function updateTargetForm() {
+  const f = FORMATS[$('tformat').value], t = targetEditing >= 0 ? targets[targetEditing] : null;
+  const keepsSecret = t && t.has_secret && t.format === $('tformat').value;
+  $('turl').placeholder = f.url;
+  $('turlhint').textContent = f.hint;
+  $('tsecretrow').style.display = f.secret ? '' : 'none';
+  $('tsecretlabel').textContent = f.secret || '';
+  $('tsecret').placeholder = keepsSecret ? '已设置（留空保持不变）' : (f.secretPh || '');
+  $('tsecrethint').textContent = keepsSecret ? '已保存的内容不会显示。' : '';
+  $('tsecretclear').style.display = f.secret && keepsSecret ? '' : 'none';
+  $('ttmplrow').style.display = f.tmpl ? '' : 'none';
+  $('ttmpllabel').textContent = f.tmpl || '';
+  $('ttmpl').placeholder = f.tmplPh || defaultTemplate;
+  $('ttmplhint').textContent = (f.tmplPh ? '占位符会按 JSON 字符串转义，要写在引号里。' : '留空使用上面显示的默认模板。占位符的值为空的行会被省略。') + PLACEHOLDERS;
+}
+let targetFormat = 'json';
+$('tformat').onchange = () => {
+  // A JSON body template makes no sense as a text template, and the other way round
+  if ((targetFormat === 'custom') !== ($('tformat').value === 'custom')) $('ttmpl').value = '';
+  targetFormat = $('tformat').value;
+  updateTargetForm();
 };
-$('whauthclear').onclick = async () => {
-  if (!confirm('确定清除 Authorization 请求头？')) return;
-  try { await postJson('/api/config', { webhook_auth: '' }); show('whmsg', '已清除', true); loadConfig(); }
-  catch (e) { show('whmsg', e.message); }
-};
-$('whtest').onclick = async () => {
-  $('whtest').disabled = true; show('whmsg', '发送中…', true);
+function openTargetForm(slot) {
+  if (slot < 0) slot = targets.findIndex(t => !t);
+  if (slot < 0) return;
+  targetEditing = slot;
+  const t = targets[slot];
+  $('tformtitle').textContent = t ? '编辑 ' + t.name : '添加推送目标';
+  $('tname').value = t ? t.name : '';
+  $('tformat').value = targetFormat = t ? t.format : 'json';
+  $('turl').value = t ? t.url : '';
+  $('tsecret').value = '';
+  $('ttmpl').value = t ? t.template : '';
+  $('tenabled').checked = t ? t.enabled : true;
+  $('tmsg').textContent = '';
+  updateTargetForm();
+  $('tform').style.display = '';
+  $('tform').scrollIntoView({ behavior:'smooth', block:'nearest' });
+}
+function closeTargetForm() { $('tform').style.display = 'none'; targetEditing = -1; }
+async function saveTarget() {
+  const f = FORMATS[$('tformat').value];
+  const body = { slot: targetEditing, name: $('tname').value.trim(), format: $('tformat').value, url: $('turl').value.trim(),
+    enabled: $('tenabled').checked };
+  if (f.tmpl) body.template = $('ttmpl').value;
+  const secret = $('tsecret').value.trim();
+  if (f.secret && secret) body.secret = secret;
+  await postJson('/api/webhooks', body);
+  return targetEditing;
+}
+async function testTarget(slot, msg) {
   try {
-    await saveWebhook();
-    const r = await postJson('/api/webhook/test');
-    if (r.success) show('whmsg', '测试成功，HTTP ' + r.status, true);
-    else show('whmsg', r.status > 0 ? '服务器返回 HTTP ' + r.status : '连接失败，请检查 URL 和网络');
-  } catch (e) { show('whmsg', e.message); }
-  $('whtest').disabled = false;
+    const r = await postJson('/api/webhooks/test', { slot });
+    if (r.success) show(msg, `「${targetName(slot)}」测试成功，HTTP ${r.status}`, true);
+    else show(msg, `「${targetName(slot)}」测试失败：` + (r.error || 'HTTP ' + r.status));
+  } catch (e) { show(msg, e.message); }
+}
+$('tadd').onclick = () => openTargetForm(-1);
+$('tcancel').onclick = closeTargetForm;
+$('tsave').onclick = async () => {
+  try { await saveTarget(); closeTargetForm(); show('tlistmsg', '已保存', true); loadTargets(); } catch (e) { show('tmsg', e.message); }
 };
+$('ttest').onclick = async () => {
+  $('ttest').disabled = true; show('tmsg', '保存并发送测试通知…', true);
+  try {
+    const slot = await saveTarget();
+    await loadTargets();
+    await testTarget(slot, 'tmsg');
+  } catch (e) { show('tmsg', e.message); }
+  $('ttest').disabled = false;
+};
+$('tsecretclear').onclick = async () => {
+  if (!confirm('确定清除已保存的密钥？')) return;
+  try { await postJson('/api/webhooks', { slot: targetEditing, secret: '' }); show('tmsg', '已清除', true); await loadTargets(); updateTargetForm(); }
+  catch (e) { show('tmsg', e.message); }
+};
+async function removeTarget(slot) {
+  if (!confirm(`确定删除推送目标「${targetName(slot)}」？`)) return;
+  try {
+    await api('/api/webhooks', { method:'DELETE', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ slot }) });
+    if (targetEditing === slot) closeTargetForm();
+    show('tlistmsg', '已删除', true);
+  } catch (e) { show('tlistmsg', e.message); }
+  await loadTargets();
+}
+
 $('hsave').onclick = async () => {
   try { await postJson('/api/config', { history_size: parseInt($('hsize').value, 10) }); show('hmsg', '已保存', true); loadConfig(); }
   catch (e) { show('hmsg', e.message); }

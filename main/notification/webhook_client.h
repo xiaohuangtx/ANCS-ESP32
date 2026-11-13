@@ -6,28 +6,36 @@
 #include <freertos/event_groups.h>
 #include <esp_http_client.h>
 
+#include <array>
 #include <string>
 #include <mutex>
 #include <functional>
 
 #include "notification.h"
+#include "webhook_target.h"
 
 /**
- * POSTs notification JSON to an HTTP(S) endpoint.
+ * Pushes notifications to up to kMaxTargets webhook targets (see
+ * WebhookTarget for the formats: plain JSON, WeCom, DingTalk, Feishu, Bark...).
  *
- * The URL and Authorization header are read from NVS (namespace "webhook",
- * keys "url" / "auth"), falling back to CONFIG_WEBHOOK_URL / CONFIG_WEBHOOK_AUTH_TOKEN.
- * An empty URL disables the webhook. Requests are sent from a dedicated task,
- * queued while Wi-Fi is down, and retried a few times on failure. The final
- * UploadState of each request is reported through the result callback.
+ * The targets are stored in NVS (namespace "webhook", keys "t0".."t2", JSON).
+ * Settings from before multiple targets (keys "url" / "auth", falling back to
+ * CONFIG_WEBHOOK_URL / CONFIG_WEBHOOK_AUTH_TOKEN) become the first target.
  *
- * The task keeps its HTTP(S) connection open between requests (keep-alive),
- * so a burst of notifications costs one TLS handshake instead of one each. The
- * connection is closed after kIdleCloseMs without requests to free the TLS
- * memory, and when the URL changes or Wi-Fi goes down.
+ * Requests are sent from a dedicated task, queued while Wi-Fi is down, and
+ * retried a few times on failure, separately for each target. The combined
+ * UploadState of each notification is reported through the result callback:
+ * delivered once every target accepted it, failed if any target gave up.
+ *
+ * The task keeps its HTTP(S) connection open between requests to the same
+ * server (keep-alive), so a burst of notifications costs one TLS handshake
+ * instead of one each. The connection is closed after kIdleCloseMs without
+ * requests to free the TLS memory, and when Wi-Fi goes down.
  */
 class WebhookClient {
 public:
+    static constexpr int kMaxTargets = 3;
+
     static WebhookClient& GetInstance() {
         static WebhookClient instance;
         return instance;
@@ -40,56 +48,76 @@ public:
     void SetResultCallback(std::function<void(uint32_t id, UploadState state)> callback);
 
     void Start();
+    // Whether any target is enabled and has a URL
     bool IsEnabled();
 
-    // Thread-safe, persisted to NVS. An empty URL disables the webhook.
-    void SetUrl(const std::string& url);
-    void SetAuthToken(const std::string& token);
-    std::string GetUrl();
-    std::string GetAuthToken();
+    // Thread-safe. Slots without a target have an empty URL.
+    std::array<WebhookTarget, kMaxTargets> GetTargets();
+    // Updates the slot with the fields present in json (see WebhookTarget::Update)
+    // and persists it. Returns "" on success, otherwise an error message.
+    std::string UpdateTarget(int slot, cJSON* json);
+    void RemoveTarget(int slot);
+
+    // The active targets among the wanted slots (bit mask, 0: all)
+    uint32_t ResolveTargets(uint32_t wanted);
 
     // Called on Wi-Fi connect / disconnect
     void SetNetworkReady(bool ready);
 
-    // Thread-safe, non-blocking. Drops the payload if the queue is full.
-    // The id is passed back to the result callback.
-    void Post(uint32_t id, const std::string& json);
+    // Thread-safe, non-blocking. Drops the notification if the queue is full.
+    // The id is passed back to the result callback. targets: bit mask from
+    // ResolveTargets(); slots that are no longer active when the request is
+    // sent are skipped.
+    void Post(uint32_t id, const AncsNotification& notification, uint32_t targets);
 
-    // Blocking: POST a sample notification right away (bypassing the queue).
-    // Returns the HTTP status code, or -1 on a network error / no URL.
-    int SendTest();
+    // Blocking: push a sample notification to one target right away
+    // (bypassing the queue). status is the HTTP status code, -1 on a network
+    // error; error explains a failure.
+    struct TestResult {
+        bool success;
+        int status;
+        std::string error;
+    };
+    TestResult SendTest(int slot);
 
 private:
     WebhookClient() = default;
 
     struct Request {
         uint32_t id;
-        std::string body;
+        AncsNotification notification;
+        uint32_t targets;
     };
 
+    void LoadTargets();
+    void SaveTarget(int slot);
     void Run();
+    UploadState SendToTarget(const Request& request, int slot);
     // Sends over the task's kept-alive connection. kPending: worth retrying.
-    UploadState Send(const std::string& body);
+    UploadState Send(const WebhookTarget& target, const WebhookRequest& request);
     void CloseConnection();
 
-    static esp_http_client_handle_t CreateClient(const std::string& url);
+    static esp_http_client_handle_t CreateClient(const std::string& url, std::string* response);
     // ESP_OK once the server answered, *status_code is set then. On an error
     // the connection is closed, so the next request starts over cleanly.
-    static esp_err_t Perform(esp_http_client_handle_t client, const std::string& body,
-                             const std::string& auth_token, int* status_code);
-    // kDelivered (2xx), kFailed (4xx, will not succeed on retry) or kPending
-    static UploadState GetResult(esp_err_t err, int status_code);
+    static esp_err_t Perform(esp_http_client_handle_t client, const WebhookRequest& request,
+                             std::string* response, int* status_code);
+    // kDelivered (2xx and the body does not report an error), kFailed (4xx or
+    // an error in the body, will not succeed on retry) or kPending
+    static UploadState GetResult(const WebhookTarget& target, esp_err_t err, int status_code,
+                                 const std::string& response, std::string* error);
+    static esp_err_t HandleHttpEvent(esp_http_client_event_t* event);
 
     std::mutex mutex_;
-    std::string url_;
-    std::string auth_token_;
+    std::array<WebhookTarget, kMaxTargets> targets_;
     QueueHandle_t queue_ = nullptr;
     std::function<void(uint32_t id, UploadState state)> result_callback_;
     EventGroupHandle_t event_group_ = nullptr;
 
     // Only used by the webhook task
     esp_http_client_handle_t client_ = nullptr;
-    std::string client_url_;
+    std::string client_origin_;  // scheme://host:port of the open connection
+    std::string response_;
 };
 
 #endif // WEBHOOK_CLIENT_H

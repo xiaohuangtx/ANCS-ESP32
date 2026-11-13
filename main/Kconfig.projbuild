@@ -69,14 +69,15 @@ config WEBHOOK_URL
     default ""
     help
         Notifications are POSTed as JSON to this URL. Leave empty to disable.
-        A value stored in NVS (namespace "webhook", key "url") takes precedence.
+        Used as the first push target until targets are set on the admin page
+        (stored in NVS, namespace "webhook", keys "t0".."t2").
 
 config WEBHOOK_AUTH_TOKEN
     string "Default Authorization header"
     default ""
     help
-        Optional value of the HTTP "Authorization" header, e.g. "Bearer xxx".
-        A value stored in NVS (namespace "webhook", key "auth") takes precedence.
+        Optional value of the HTTP "Authorization" header, e.g. "Bearer xxx",
+        for CONFIG_WEBHOOK_URL.
 
 config WEBHOOK_TIMEOUT_MS
     int "HTTP timeout (ms)"

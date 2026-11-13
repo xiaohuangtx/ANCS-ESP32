@@ -9,7 +9,7 @@
 
 /**
  * Admin web page on port 80, served while the station is connected:
- * device status, notification history, webhook / history settings,
+ * device status, notification history, webhook targets, history settings,
  * saved Wi-Fi networks, firmware upload (OTA), reboot.
  *
  * If an admin password is set (NVS namespace "web", key "password", falling
@@ -64,6 +64,9 @@ private:
     static void SendNotificationsChanged(void* arg);
     static esp_err_t HandleGetConfig(httpd_req_t* req);
     static esp_err_t HandleSetConfig(httpd_req_t* req);
+    static esp_err_t HandleGetWebhooks(httpd_req_t* req);
+    static esp_err_t HandleSetWebhook(httpd_req_t* req);
+    static esp_err_t HandleRemoveWebhook(httpd_req_t* req);
     static esp_err_t HandleWebhookTest(httpd_req_t* req);
     static esp_err_t HandleOta(httpd_req_t* req);
     static esp_err_t HandleReboot(httpd_req_t* req);

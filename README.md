@@ -1,6 +1,6 @@
 # ANCS-ESP32
 
-通过 BLE 连接 iPhone，使用 Apple **ANCS**（Apple Notification Center Service）获取手机通知，打印到串口控制台，并可通过 **Webhook** 将通知 POST 到其他服务器。
+通过 BLE 连接 iPhone，使用 Apple **ANCS**（Apple Notification Center Service）获取手机通知，打印到串口控制台，并可通过 **Webhook** 推送到其他服务器或企业微信、钉钉、飞书、Bark 等推送服务。
 
 ## 功能
 
@@ -10,9 +10,9 @@
 - 完整 ANCS 客户端：服务发现 → 订阅 → 获取通知属性（App、标题、副标题、正文、时间、操作按钮）→ 查询 App 显示名称（带缓存）
 - Data Source 分包重组，Control Point 请求串行队列 + 超时
 - Wi-Fi：保存多个 SSID，无配置或连接超时自动开启配网热点；超时开启的热点在扫描到已保存的 Wi-Fi 且无人连接热点时自动关闭并重连
+- Webhook：最多 3 个推送目标，支持原始 JSON、企业微信 / 钉钉 / 飞书群机器人、Bark、ntfy、Server酱、Telegram 和自定义 JSON 模板；独立任务 + 队列，Wi-Fi 断开时排队，失败重试，支持 HTTPS（内置证书包）
 - 时钟：iPhone 连接时从它的 Current Time Service 读取时间和时区，连上 Wi-Fi 后用 SNTP 校准
-- Webhook：独立任务 + 队列，Wi-Fi 断开时排队，失败重试，支持 HTTPS（内置证书包）
-- 管理后台：连上 Wi-Fi 后在 `http://<设备IP>/` 提供网页，可查看通知记录（默认保存最近 30 条）、配置 Webhook、上传固件升级（OTA）
+- 管理后台：连上 Wi-Fi 后在 `http://<设备IP>/` 提供网页，可查看通知记录（默认保存最近 30 条）、配置推送目标、上传固件升级（OTA）
 - BOOT 按键：长按进入 Wi-Fi 配网，三击清除 BLE 绑定
 
 ## 目录结构
@@ -27,6 +27,7 @@ ANCS-ESP32/
     ├── application.cc/h   # 主事件循环、Schedule()、模块组装
     ├── settings.cc/h      # NVS 封装
     ├── time_sync.cc/h     # 时钟：iPhone Current Time Service + SNTP，时区
+    ├── encoding.cc/h      # Base64、URL 编码、SHA-256 / HMAC（钉钉、飞书加签）
     ├── Kconfig.projbuild  # menuconfig 配置项
     ├── idf_component.yml  # 依赖：espressif/button、espressif/cjson
     ├── ble/
@@ -42,7 +43,8 @@ ANCS-ESP32/
     │   ├── notification.* # 通知数据结构、控制台打印、JSON 序列化
     │   ├── notification_history.* # 最近通知记录及上传状态（管理后台显示）
     │   ├── notification_store.* # 通知记录持久化（`storage` 分区上的环形日志）
-    │   └── webhook_client.*
+    │   ├── webhook_target.* # 推送目标的格式（企业微信、钉钉…）、消息模板、加签
+    │   └── webhook_client.* # 推送任务：队列、重试、多个目标
     ├── web/
     │   ├── web_server.*   # 管理后台 HTTP 服务 + OTA
     │   ├── http_utils.*   # JSON 请求 / 响应工具（管理后台与配网页面共用）
@@ -113,7 +115,7 @@ Actions  : [] / [清除]
   - 实时更新：页面通过 WebSocket（`/api/events`）接收设备的变化信号，新通知、上传状态、操作按钮变化立即显示，标题栏右侧显示「实时」。连接断开时自动重连，期间通知记录页每 5 秒轮询。每个打开的页面占用设备的 1 个 HTTP 连接（共 5 个）
   - 新通知会在右上角弹出（在任意标签页），8 秒后消失；来电会一直显示，直到接听、拒绝或结束
   - 操作按钮：通知还在已连接 iPhone 的通知中心里时，可以直接点击 iOS 提供的按钮（如来电的「接听 / 拒绝」、消息的「清除」），相当于在手机上操作。通知在 iPhone 上被清除、或 iPhone 断开后按钮自动隐藏；重连后 iOS 重新推送的通知会恢复按钮
-- **设置**：Webhook URL / Authorization（保存后立即生效，可发送测试通知）、蓝牙同时连接数量、通知保存条数、管理密码
+- **设置**：推送目标（见 [Webhook](#webhook)，保存后立即生效，可发送测试通知）、蓝牙同时连接数量、通知保存条数、管理密码
 - **Wi-Fi**：查看、添加、编辑（改名称 / 密码）、删除已保存的 Wi-Fi（最多 10 个，存于 NVS namespace `wifi`，与配网热点页面共用）。密码不会回显。设备总是连接信号最强的已保存 Wi-Fi，所以没有优先级设置；修改不影响当前连接，在下次重新扫描连接或重启后生效
 - **固件升级**：选择 `build/ancs-esp32.bin` 上传。设备重启后页面会检查是否运行在新分区上，新固件启动失败被回滚时会提示。设备会检查芯片型号和项目名，写入另一个 OTA 分区后自动重启；新固件连上 Wi-Fi、管理后台启动后才会被确认，如果新固件在此之前崩溃重启，bootloader 会自动回滚到旧版本
 - **系统**：
@@ -121,7 +123,7 @@ Actions  : [] / [清除]
   - 运行日志：串口输出（`ESP_LOGx` 和 `printf`）的最近 32KB，保存在内存中，按级别着色，打开时每 3 秒只拉取新增部分，可下载。`app_main` 之前的启动信息只在串口上
   - 重启、清除蓝牙配对、重新配网
 
-默认没有密码。设置管理密码后浏览器会弹出登录框，用户名 `admin`。已保存的 Webhook Authorization 不会在页面上回显。
+默认没有密码。设置管理密码后浏览器会弹出登录框，用户名 `admin`。推送目标已保存的 Authorization、加签密钥、Chat ID 不会在页面上回显。
 
 用脚本调用接口时，JSON 请求须带 `Content-Type: application/json`，OTA 须带 `Content-Type: application/octet-stream`。也可在 menuconfig `ANCS-ESP32 Configuration > Admin web page` 中设置默认密码和默认保存条数（页面上修改的值保存在 NVS 中，优先级更高）。
 
@@ -141,12 +143,37 @@ Actions  : [] / [清除]
 
 ## Webhook
 
-URL 为空时 Webhook 关闭。配置来源（优先级从高到低）：
+在管理后台「设置 > 推送目标」中添加，最多 3 个，保存在 NVS（namespace `webhook`，key `t0` / `t1` / `t2`）。没有推送目标时 Webhook 关闭，通知只记录在设备上。
+旧版本保存的单个 Webhook（key `url` / `auth`）和 menuconfig 中的 `ANCS-ESP32 Configuration > Webhook` 会作为第 1 个推送目标，直到在页面上修改推送目标。
 
-1. NVS：namespace `webhook`，key `url` / `auth`（在管理后台「设置」页面修改，或代码中调用 `WebhookClient::GetInstance().SetUrl(...)` / `SetAuthToken(...)` 写入）
-2. menuconfig：`ANCS-ESP32 Configuration > Webhook`
+| 格式 | URL | 密钥字段 |
+| --- | --- | --- |
+| JSON（原始通知） | 任意 | `Authorization` 请求头（可选） |
+| 企业微信群机器人 | `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…` | - |
+| 钉钉群机器人 | `https://oapi.dingtalk.com/robot/send?access_token=…` | 加签密钥（可选，`SEC` 开头） |
+| 飞书群机器人 | `https://open.feishu.cn/open-apis/bot/v2/hook/…` | 签名校验密钥（可选） |
+| Bark | `https://api.day.app/<Key>` | - |
+| ntfy | `https://ntfy.sh/<主题>` | `Authorization` 请求头（可选） |
+| Server酱 | `https://sctapi.ftqq.com/<SendKey>.send` | - |
+| Telegram Bot | `https://api.telegram.org/bot<Token>/sendMessage` | Chat ID（必填） |
+| 自定义 JSON | 任意 | `Authorization` 请求头（可选） |
 
-每条通知发送一次 `POST`，`Content-Type: application/json`，如配置了 token 则带 `Authorization` 头：
+除原始 JSON 外，消息内容由**消息模板**生成，默认为：
+
+```
+【{{app}}】{{title}}
+{{subtitle}}
+{{message}}
+```
+
+可用的占位符：`{{app}}`（App 名称，没有时为 App ID）、`{{app_id}}`、`{{title}}`、`{{subtitle}}`、`{{message}}`、`{{category}}`（如「社交」）、`{{device}}`（来源设备名称）、`{{date}}`、`{{event}}`、`{{uid}}`、`{{positive_action}}`、`{{negative_action}}`。占位符全部为空的行会被省略（例如没有副标题时）。Bark、ntfy、Server酱 把第一行作为标题，其余作为正文。
+自定义 JSON 格式的模板就是请求体本身，占位符按 JSON 字符串转义，要写在引号里，例如 `{"text": "{{app}}：{{title}}\n{{message}}"}`；保存时会用示例通知检查生成的是否为合法 JSON。
+
+钉钉、飞书的加签使用当前时间，需要设备时钟已校准（见[时钟](#时钟)）；开机后时钟还没校准时，推送任务最多等待 30 秒。企业微信、钉钉、飞书、Bark、Server酱 出错时也可能返回 HTTP 200，设备会检查响应中的错误码（`errcode` / `code`），出错记为推送失败，不重试。
+
+### 请求格式
+
+原始 JSON 格式下，每条通知发送一次 `POST`，`Content-Type: application/json`，如配置了 `Authorization` 则带该请求头：
 
 ```json
 {
@@ -180,9 +207,11 @@ URL 为空时 Webhook 关闭。配置来源（优先级从高到低）：
 
 `device` 是 ESP32 的 MAC；`peer_name` / `peer_address` 标识通知来自哪台 iPhone / iPad（地址为绑定后的身份地址，重连不变）。
 `event` 取值为 `added` / `modified`；管理后台发送的测试通知为 `test`。
-`message` 最多 `CONFIG_ANCS_MAX_MESSAGE_LEN`（默认 512）字节，更长的内容 iOS 不会发送，此时 `message_truncated` 为 `true`、`message_size` 为原始长度。返回 2xx 视为成功；网络错误或 5xx 最多重试 3 次；4xx 不重试。重试期间 Wi-Fi 断开时会等待重新连上再发送，这种失败不计入重试次数。
+`message` 最多 `CONFIG_ANCS_MAX_MESSAGE_LEN`（默认 512）字节，更长的内容 iOS 不会发送，此时 `message_truncated` 为 `true`、`message_size` 为原始长度。
 
-连接会复用（HTTP keep-alive）：连续多条通知只需建立一次连接 / TLS 握手；空闲 30 秒、修改 URL 或 Wi-Fi 断开后关闭。复用的连接已被服务器关闭时会立即重连重发，不计入重试次数。
+每个推送目标分别发送和重试：返回 2xx 视为成功；网络错误或 5xx 最多重试 3 次；4xx 不重试。重试期间 Wi-Fi 断开时会等待重新连上再发送，这种失败不计入重试次数。所有目标都成功才记为「已推送」，任何一个目标失败记为「推送失败」。
+
+连接会复用（HTTP keep-alive）：连续发往同一服务器的通知只需建立一次连接 / TLS 握手；空闲 30 秒、换到另一个服务器或 Wi-Fi 断开后关闭。复用的连接已被服务器关闭时会立即重连重发，不计入重试次数。
 
 ## 时钟
 
@@ -191,7 +220,7 @@ URL 为空时 Webhook 关闭。配置来源（优先级从高到低）：
 - **iPhone**：iOS 向已配对的设备提供 Current Time Service。每次连接时读取 iPhone 的当前时间和时区（含夏令时），不需要 Wi-Fi。时区保存在 NVS（namespace `time`，key `utc_off`），重启后沿用；在此之前使用 menuconfig `ANCS-ESP32 Configuration > Time > Default UTC offset`（默认 UTC+8）
 - **SNTP**：连上 Wi-Fi 后启动，默认服务器 `ntp.aliyun.com` 和 `pool.ntp.org`（menuconfig 中可修改或关闭），每小时同步一次。SNTP 最近 2 小时内同步过时，iPhone 只用来更新时区
 
-校准后通知记录带有收到时间（页面上显示为具体时间）。概览页显示设备时间和最近一次校准的来源。
+校准后通知记录带有收到时间（页面上显示为具体时间），钉钉、飞书加签也依赖它。概览页显示设备时间和最近一次校准的来源。
 
 > 第二个 SNTP 服务器需要 `CONFIG_LWIP_SNTP_MAX_SERVERS=2`（已写入 `sdkconfig.defaults`）。之前编译过的工程须删除 `sdkconfig` 后重新生成才会生效，否则只使用第一个服务器。
 
@@ -199,3 +228,4 @@ URL 为空时 Webhook 关闭。配置来源（优先级从高到低）：
 
 - 对通知执行操作（如拒接来电）：`BleManager::GetInstance().PerformAction(notification.conn_handle, notification.uid, kAncsActionNegative)`，可从任意任务调用。
 - 新增通知去向（MQTT、屏幕显示等）：在 `Application::OnNotification()` 中添加。
+- 新增推送格式：在 `webhook_target.cc` 的 `BuildWebhookRequest()`（请求）和 `CheckWebhookResponse()`（响应中的错误码）中添加，并在 `admin.html` 的 `FORMATS` 中加上表单说明。

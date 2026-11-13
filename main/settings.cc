@@ -88,6 +88,14 @@ void Settings::SetBool(const std::string& key, bool value) {
     }
 }
 
+bool Settings::HasKey(const std::string& key) {
+    if (nvs_handle_ == 0) {
+        return false;
+    }
+    nvs_type_t type;
+    return nvs_find_key(nvs_handle_, key.c_str(), &type) == ESP_OK;
+}
+
 void Settings::EraseKey(const std::string& key) {
     if (read_write_) {
         auto ret = nvs_erase_key(nvs_handle_, key.c_str());

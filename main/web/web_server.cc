@@ -6,6 +6,7 @@
 #include "notification_history.h"
 #include "notification_store.h"
 #include "time_sync.h"
+#include "encoding.h"
 #include "log_buffer.h"
 #include "settings.h"
 #include "http_utils.h"
@@ -53,21 +54,6 @@ static constexpr size_t kMinImageSize =
 
 static WebServer* Self(httpd_req_t* req) {
     return static_cast<WebServer*>(req->user_ctx);
-}
-
-static std::string Base64Encode(const std::string& in) {
-    static const char kTable[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    for (size_t i = 0; i < in.size(); i += 3) {
-        uint32_t n = (uint8_t)in[i] << 16;
-        if (i + 1 < in.size()) n |= (uint8_t)in[i + 1] << 8;
-        if (i + 2 < in.size()) n |= (uint8_t)in[i + 2];
-        out += kTable[(n >> 18) & 63];
-        out += kTable[(n >> 12) & 63];
-        out += i + 1 < in.size() ? kTable[(n >> 6) & 63] : '=';
-        out += i + 2 < in.size() ? kTable[n & 63] : '=';
-    }
-    return out;
 }
 
 // Run the callback on the esp_timer task after a delay, so the HTTP response
@@ -120,7 +106,7 @@ void WebServer::Start() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     // Large enough for the webhook test, which runs a TLS handshake in this task
     config.stack_size = 8192;
-    config.max_uri_handlers = 20;
+    config.max_uri_handlers = 28;
     config.max_open_sockets = kMaxOpenSockets;
     config.lru_purge_enable = true;
     config.recv_wait_timeout = 10;
@@ -144,7 +130,10 @@ void WebServer::Start() {
          .is_websocket = true, .ws_pre_handshake_cb = HandleEventsHandshake},
         {"/api/config", HTTP_GET, HandleGetConfig, this},
         {"/api/config", HTTP_POST, HandleSetConfig, this},
-        {"/api/webhook/test", HTTP_POST, HandleWebhookTest, this},
+        {"/api/webhooks", HTTP_GET, HandleGetWebhooks, this},
+        {"/api/webhooks", HTTP_POST, HandleSetWebhook, this},
+        {"/api/webhooks", HTTP_DELETE, HandleRemoveWebhook, this},
+        {"/api/webhooks/test", HTTP_POST, HandleWebhookTest, this},
         {"/api/ota", HTTP_POST, HandleOta, this},
         {"/api/reboot", HTTP_POST, HandleReboot, this},
         {"/api/ble/clear-bonds", HTTP_POST, HandleClearBonds, this},
@@ -287,7 +276,9 @@ esp_err_t WebServer::HandleStatus(httpd_req_t* req) {
     auto& history = NotificationHistory::GetInstance();
     cJSON_AddNumberToObject(json, "notification_count", history.GetCount());
     cJSON_AddNumberToObject(json, "history_size", history.GetCapacity());
-    cJSON_AddBoolToObject(json, "webhook_enabled", WebhookClient::GetInstance().IsEnabled());
+    uint32_t targets = WebhookClient::GetInstance().ResolveTargets(0);
+    cJSON_AddBoolToObject(json, "webhook_enabled", targets != 0);
+    cJSON_AddNumberToObject(json, "webhook_targets", __builtin_popcount(targets));
 
     auto time_status = TimeSync::GetInstance().GetStatus();
     cJSON* time_json = cJSON_AddObjectToObject(json, "time");
@@ -297,7 +288,6 @@ esp_err_t WebServer::HandleStatus(httpd_req_t* req) {
     cJSON_AddNumberToObject(time_json, "last_sync", (double)time_status.last_sync);
     cJSON_AddNumberToObject(time_json, "utc_offset", time_status.utc_offset);
     cJSON_AddBoolToObject(time_json, "offset_from_iphone", time_status.offset_from_iphone);
-
 
     cJSON* diag_json = cJSON_AddObjectToObject(json, "diag");
     cJSON_AddStringToObject(diag_json, "reset_reason", ResetReasonName(esp_reset_reason()));
@@ -477,11 +467,7 @@ esp_err_t WebServer::HandleGetConfig(httpd_req_t* req) {
     if (!self->CheckAuth(req)) {
         return ESP_OK;
     }
-    auto& webhook = WebhookClient::GetInstance();
     cJSON* json = cJSON_CreateObject();
-    cJSON_AddStringToObject(json, "webhook_url", webhook.GetUrl().c_str());
-    // Like the Wi-Fi passwords, the token is never sent back
-    cJSON_AddBoolToObject(json, "has_webhook_auth", !webhook.GetAuthToken().empty());
     cJSON_AddNumberToObject(json, "history_size", NotificationHistory::GetInstance().GetCapacity());
     cJSON_AddNumberToObject(json, "history_size_min", NotificationHistory::kMinCapacity);
     cJSON_AddNumberToObject(json, "history_size_max", NotificationHistory::kMaxCapacity);
@@ -492,8 +478,8 @@ esp_err_t WebServer::HandleGetConfig(httpd_req_t* req) {
     return SendJson(req, json);
 }
 
-// Every field is optional:
-// {"webhook_url", "webhook_auth", "history_size", "ble_max_connections", "password"}
+// Every field is optional: {"history_size", "ble_max_connections", "password"}.
+// The webhook targets have their own endpoint, /api/webhooks.
 esp_err_t WebServer::HandleSetConfig(httpd_req_t* req) {
     auto* self = Self(req);
     if (!self->CheckAuth(req)) {
@@ -504,24 +490,12 @@ esp_err_t WebServer::HandleSetConfig(httpd_req_t* req) {
         return SendError(req, "400 Bad Request", "请求格式错误");
     }
 
-    cJSON* url = cJSON_GetObjectItem(json, "webhook_url");
-    cJSON* auth = cJSON_GetObjectItem(json, "webhook_auth");
     cJSON* history_size = cJSON_GetObjectItem(json, "history_size");
     cJSON* ble_max_connections = cJSON_GetObjectItem(json, "ble_max_connections");
     cJSON* password = cJSON_GetObjectItem(json, "password");
 
     // Validate everything before saving anything
     std::string error;
-    if (url != nullptr) {
-        std::string value = cJSON_IsString(url) ? url->valuestring : "";
-        if (!cJSON_IsString(url) ||
-            (!value.empty() && value.rfind("http://", 0) != 0 && value.rfind("https://", 0) != 0)) {
-            error = "Webhook URL 必须以 http:// 或 https:// 开头";
-        }
-    }
-    if (auth != nullptr && !cJSON_IsString(auth)) {
-        error = "Authorization 格式错误";
-    }
     if (history_size != nullptr && !cJSON_IsNumber(history_size)) {
         error = "保存条数必须是数字";
     }
@@ -538,14 +512,6 @@ esp_err_t WebServer::HandleSetConfig(httpd_req_t* req) {
         return SendError(req, "400 Bad Request", error);
     }
 
-    auto& webhook = WebhookClient::GetInstance();
-    if (url != nullptr) {
-        webhook.SetUrl(url->valuestring);
-        ESP_LOGI(TAG, "Webhook URL set to \"%s\"", url->valuestring);
-    }
-    if (auth != nullptr) {
-        webhook.SetAuthToken(auth->valuestring);
-    }
     if (history_size != nullptr) {
         NotificationHistory::GetInstance().SetCapacity(history_size->valueint);
     }
@@ -560,19 +526,80 @@ esp_err_t WebServer::HandleSetConfig(httpd_req_t* req) {
     return SendOk(req);
 }
 
+// {"max", "items": [target or null per slot]}. Secrets are never sent back,
+// only whether one is set.
+esp_err_t WebServer::HandleGetWebhooks(httpd_req_t* req) {
+    if (!Self(req)->CheckAuth(req)) {
+        return ESP_OK;
+    }
+    cJSON* json = cJSON_CreateObject();
+    cJSON_AddNumberToObject(json, "max", WebhookClient::kMaxTargets);
+    cJSON_AddStringToObject(json, "default_template", kDefaultWebhookTemplate);
+    cJSON* items = cJSON_AddArrayToObject(json, "items");
+    for (auto& target : WebhookClient::GetInstance().GetTargets()) {
+        cJSON_AddItemToArray(items, target.url.empty() ? cJSON_CreateNull() : target.ToCJson(false));
+    }
+    return SendJson(req, json);
+}
+
+// "slot" from the request body, -1 if missing
+static int GetSlot(cJSON* json) {
+    cJSON* slot = json ? cJSON_GetObjectItem(json, "slot") : nullptr;
+    if (!cJSON_IsNumber(slot) || slot->valueint < 0 || slot->valueint >= WebhookClient::kMaxTargets) {
+        return -1;
+    }
+    return slot->valueint;
+}
+
+// {"slot", "name", "enabled", "format", "url", "secret", "template"}; missing
+// fields keep their value (the secret is cleared when the format changes)
+esp_err_t WebServer::HandleSetWebhook(httpd_req_t* req) {
+    if (!Self(req)->CheckAuth(req)) {
+        return ESP_OK;
+    }
+    cJSON* json = ReadJsonBody(req);
+    int slot = GetSlot(json);
+    if (slot < 0) {
+        cJSON_Delete(json);
+        return SendError(req, "400 Bad Request", "请求格式错误");
+    }
+    std::string error = WebhookClient::GetInstance().UpdateTarget(slot, json);
+    cJSON_Delete(json);
+    return SendResult(req, error);
+}
+
+// {"slot"}
+esp_err_t WebServer::HandleRemoveWebhook(httpd_req_t* req) {
+    if (!Self(req)->CheckAuth(req)) {
+        return ESP_OK;
+    }
+    cJSON* json = ReadJsonBody(req);
+    int slot = GetSlot(json);
+    cJSON_Delete(json);
+    if (slot < 0) {
+        return SendError(req, "400 Bad Request", "请求格式错误");
+    }
+    WebhookClient::GetInstance().RemoveTarget(slot);
+    return SendOk(req);
+}
+
+// {"slot"}: push a sample notification to the saved target
 esp_err_t WebServer::HandleWebhookTest(httpd_req_t* req) {
     if (!Self(req)->CheckAuth(req)) {
         return ESP_OK;
     }
-    auto& webhook = WebhookClient::GetInstance();
-    if (!webhook.IsEnabled()) {
-        return SendError(req, "400 Bad Request", "未配置 Webhook URL");
+    cJSON* json = ReadJsonBody(req);
+    int slot = GetSlot(json);
+    cJSON_Delete(json);
+    if (slot < 0) {
+        return SendError(req, "400 Bad Request", "请求格式错误");
     }
-    int status = webhook.SendTest();
-    cJSON* json = cJSON_CreateObject();
-    cJSON_AddBoolToObject(json, "success", status >= 200 && status < 300);
-    cJSON_AddNumberToObject(json, "status", status);
-    return SendJson(req, json);
+    auto result = WebhookClient::GetInstance().SendTest(slot);
+    cJSON* response = cJSON_CreateObject();
+    cJSON_AddBoolToObject(response, "success", result.success);
+    cJSON_AddNumberToObject(response, "status", result.status);
+    cJSON_AddStringToObject(response, "error", result.error.c_str());
+    return SendJson(req, response);
 }
 
 esp_err_t WebServer::HandleReboot(httpd_req_t* req) {

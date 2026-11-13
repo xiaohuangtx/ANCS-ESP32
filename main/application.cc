@@ -152,7 +152,8 @@ void Application::ResendPendingNotifications() {
     for (size_t i = 0; i < ids.size(); i++) {
         StoredNotification stored;
         if (ids.size() - i <= kMaxResentNotifications && store.ReadPending(ids[i], &stored)) {
-            webhook.Post(ids[i], stored.notification.ToJson());
+            // To the targets configured now, which may have changed meanwhile
+            webhook.Post(ids[i], stored.notification, webhook.ResolveTargets(0));
         } else {
             NotificationHistory::GetInstance().SetUploadState(ids[i], UploadState::kFailed);
         }
@@ -192,9 +193,12 @@ void Application::OnNotification(const AncsNotification& notification) {
     ESP_LOGI(TAG, "Notification uid=%lu from %s, app %s", (unsigned long)notification.uid,
              notification.peer_name.c_str(), notification.app_id.c_str());
     auto& webhook = WebhookClient::GetInstance();
+    uint32_t targets = webhook.ResolveTargets(0);
     uint32_t id = NotificationHistory::GetInstance().Add(
-        notification, webhook.IsEnabled() ? UploadState::kPending : UploadState::kSkipped);
-    webhook.Post(id, notification.ToJson());
+        notification, targets != 0 ? UploadState::kPending : UploadState::kSkipped);
+    if (targets != 0) {
+        webhook.Post(id, notification, targets);
+    }
     notifications_handled_++;
 }
 
