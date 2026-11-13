@@ -4,6 +4,7 @@
 #include "webhook_client.h"
 #include "notification_history.h"
 #include "notification_store.h"
+#include "notification_filter.h"
 #include "time_sync.h"
 #include "web_server.h"
 #include "ancs_defs.h"
@@ -152,12 +153,20 @@ void Application::ResendPendingNotifications() {
     for (size_t i = 0; i < ids.size(); i++) {
         StoredNotification stored;
         if (ids.size() - i <= kMaxResentNotifications && store.ReadPending(ids[i], &stored)) {
-            // To the targets configured now, which may have changed meanwhile
-            webhook.Post(ids[i], stored.notification, webhook.ResolveTargets(0));
+            // By the current rules and targets, which may have changed meanwhile
+            webhook.Post(ids[i], stored.notification, GetWebhookTargets(stored.notification));
         } else {
             NotificationHistory::GetInstance().SetUploadState(ids[i], UploadState::kFailed);
         }
     }
+}
+
+uint32_t Application::GetWebhookTargets(const AncsNotification& notification) {
+    auto decision = NotificationFilter::GetInstance().Evaluate(notification);
+    if (decision.action != NotificationFilter::Action::kForward) {
+        return 0;
+    }
+    return WebhookClient::GetInstance().ResolveTargets(decision.targets);
 }
 
 void Application::OnNotification(const AncsNotification& notification) {
@@ -189,11 +198,23 @@ void Application::OnNotification(const AncsNotification& notification) {
     }
 
     notification.Print();
+    auto decision = NotificationFilter::GetInstance().Evaluate(notification);
+    // Which rule decided, for the log
+    std::string rule = decision.rule >= 0 ? "rule " + std::to_string(decision.rule + 1) : "default action";
+    if (decision.action == NotificationFilter::Action::kDrop) {
+        ESP_LOGI(TAG, "Notification uid=%lu from %s, app %s: dropped (%s)", (unsigned long)notification.uid,
+                 notification.peer_name.c_str(), notification.app_id.c_str(), rule.c_str());
+        notifications_dropped_++;
+        return;
+    }
     // Print() goes to the console only; leave a trace in the admin page log
-    ESP_LOGI(TAG, "Notification uid=%lu from %s, app %s", (unsigned long)notification.uid,
-             notification.peer_name.c_str(), notification.app_id.c_str());
+    ESP_LOGI(TAG, "Notification uid=%lu from %s, app %s: %s (%s)", (unsigned long)notification.uid,
+             notification.peer_name.c_str(), notification.app_id.c_str(), FilterActionName(decision.action),
+             rule.c_str());
     auto& webhook = WebhookClient::GetInstance();
-    uint32_t targets = webhook.ResolveTargets(0);
+    uint32_t targets = decision.action == NotificationFilter::Action::kForward
+                           ? webhook.ResolveTargets(decision.targets)
+                           : 0;
     uint32_t id = NotificationHistory::GetInstance().Add(
         notification, targets != 0 ? UploadState::kPending : UploadState::kSkipped);
     if (targets != 0) {
@@ -227,6 +248,7 @@ Application::Diagnostics Application::GetDiagnostics() {
     diagnostics.notifications_received = notifications_received_;
     diagnostics.notifications_handled = notifications_handled_;
     diagnostics.notifications_skipped = notifications_skipped_;
+    diagnostics.notifications_dropped = notifications_dropped_;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         diagnostics.pending_tasks = main_tasks_.size();

@@ -3,7 +3,6 @@
 #include <cstring>
 #include <strings.h>
 
-static constexpr size_t kMaxBodySize = 4096;
 static constexpr int kMaxRecvTimeouts = 3;
 
 esp_err_t SendJson(httpd_req_t* req, cJSON* json) {
@@ -64,7 +63,7 @@ bool RecvExact(httpd_req_t* req, char* buffer, size_t length) {
 }
 
 cJSON* ReadJsonBody(httpd_req_t* req) {
-    if (req->content_len == 0 || req->content_len > kMaxBodySize || !HasContentType(req, "application/json")) {
+    if (req->content_len == 0 || req->content_len > kMaxJsonBodySize || !HasContentType(req, "application/json")) {
         return nullptr;
     }
     std::string body(req->content_len, '\0');

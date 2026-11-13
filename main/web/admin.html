@@ -30,6 +30,8 @@ label { display:block; margin:12px 0 4px; color:var(--muted); font-size:13px; }
 input[type=text],input[type=password],input[type=number],input[type=url],textarea,select { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; font-size:14px; font-family:inherit; background:#fff; }
 textarea { resize:vertical; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace; }
 input:focus,textarea:focus,select:focus { outline:none; border-color:var(--primary); }
+.cats { display:flex; flex-wrap:wrap; gap:4px 16px; }
+.cats label { display:flex; align-items:center; gap:4px; margin:4px 0; color:var(--text); font-size:13px; }
 .hint { color:var(--muted); font-size:12px; margin-top:4px; }
 button { padding:7px 16px; border-radius:6px; border:1px solid var(--line); background:#fff; cursor:pointer; font-size:14px; }
 button.primary { background:var(--primary); border-color:var(--primary); color:#fff; }
@@ -126,7 +128,7 @@ header .live.on::before { background:var(--ok); }
   <div class="card">
     <h2>推送目标 <span class="badge gray" id="tcount"></span><span class="spacer"></span><button id="tadd">添加</button></h2>
     <div id="tlist"><div class="empty">加载中…</div></div>
-    <div class="hint">通知会推送到所有已启用的目标。支持原始 JSON、企业微信、钉钉、飞书、Bark、ntfy、Server酱、Telegram，以及自定义 JSON 模板。</div>
+    <div class="hint">通知会推送到所有已启用的目标，也可以用下面的过滤规则指定推送到哪些目标。支持原始 JSON、企业微信、钉钉、飞书、Bark、ntfy、Server酱、Telegram，以及自定义 JSON 模板。</div>
     <div class="actions"><span class="msg" id="tlistmsg"></span></div>
   </div>
   <div class="card" id="tform" style="display:none">
@@ -139,6 +141,31 @@ header .live.on::before { background:var(--ok); }
     <div id="ttmplrow"><label id="ttmpllabel"></label><textarea id="ttmpl" rows="4"></textarea><div class="hint" id="ttmplhint"></div></div>
     <label class="check"><input type="checkbox" id="tenabled" checked> 启用</label>
     <div class="actions"><button class="primary" id="tsave">保存</button><button id="ttest">保存并测试</button><button id="tcancel">取消</button><button class="danger" id="tsecretclear">清除已保存的密钥</button><span class="msg" id="tmsg"></span></div>
+  </div>
+  <div class="card">
+    <h2>过滤规则 <span class="badge gray" id="rcount"></span><span class="spacer"></span><button id="radd">添加规则</button></h2>
+    <div id="rlist"></div>
+    <label>没有规则匹配时</label>
+    <select id="rdefault"><option value="forward">推送到所有目标</option><option value="record">只记录，不推送</option><option value="drop">丢弃（不记录、不推送）</option></select>
+    <div class="hint">从上到下依次检查，第一条匹配的已启用规则决定如何处理这条通知。规则里填写的各项条件须同时满足，同一项中填写多个值时满足任意一个即可，留空的项不限制。修改后立即生效。</div>
+    <div class="actions"><span class="msg" id="rmsg"></span></div>
+  </div>
+  <div class="card" id="rform" style="display:none">
+    <h2 id="rformtitle">添加规则</h2>
+    <label>名称（可选）</label><input type="text" id="rname" maxlength="64" placeholder="例如：屏蔽购物 App">
+    <label>App</label><input type="text" id="rapps" autocomplete="off" placeholder="com.tencent.xin, 信息">
+    <div class="hint">App ID 或 App 名称，须完全一致（英文不区分大小写），多个用逗号分隔。在通知记录中打开一条通知，点「按此 App 添加规则」可自动填写。</div>
+    <label>分类</label><div class="cats" id="rcats"></div>
+    <div class="hint">不勾选表示任意分类。</div>
+    <label>关键词</label><input type="text" id="rkeywords" autocomplete="off" placeholder="验证码, 快递">
+    <div class="hint">标题、副标题或正文中包含任意一个即可（英文不区分大小写），多个用逗号分隔。</div>
+    <label>设备</label><input type="text" id="rdevices" autocomplete="off" placeholder="张三的iPhone">
+    <div class="hint">设备名称或地址，须完全一致，多个用逗号分隔。只连接一台设备时留空即可。</div>
+    <label>操作</label>
+    <select id="raction"><option value="forward">推送</option><option value="record">只记录，不推送</option><option value="drop">丢弃（不记录、不推送）</option></select>
+    <div id="rtargetsrow"><label>推送到</label><div class="cats" id="rtargets"></div><div class="hint">不勾选表示推送到所有已启用的目标。</div></div>
+    <label class="check"><input type="checkbox" id="renabled" checked> 启用</label>
+    <div class="actions"><button class="primary" id="rsave">保存</button><button id="rcancel">取消</button><span class="msg" id="rformmsg"></span></div>
   </div>
   <div class="card">
     <h2>蓝牙</h2>
@@ -226,7 +253,7 @@ header .live.on::before { background:var(--ok); }
 const $ = id => document.getElementById(id);
 const CATEGORY = { Other:'其他', IncomingCall:'来电', MissedCall:'未接来电', Voicemail:'语音留言', Social:'社交', Schedule:'日程',
   Email:'邮件', News:'新闻', HealthAndFitness:'健康', BusinessAndFinance:'财务', Location:'位置', Entertainment:'娱乐' };
-let status = null, timer = null, diagTimer = null;
+let status = null, timer = null, diagTimer = null, configLoaded = Promise.resolve();
 
 async function api(path, opts = {}) {
   const r = await fetch(path, opts);
@@ -276,7 +303,7 @@ function switchTab(name) {
   clearInterval(timer); clearInterval(diagTimer);
   const refresh = { overview: loadStatus, notifications: loadNotifications, ota: loadStatus, system: loadLogs }[name];
   if (name === 'system') { followLog = true; loadDiag(); diagTimer = setInterval(loadDiag, 10000); }
-  if (name === 'settings') loadConfig();
+  if (name === 'settings') configLoaded = loadConfig();
   if (name === 'wifi') loadWifi();
   if (refresh) {
     refresh();
@@ -330,7 +357,7 @@ async function loadDiag() {
   $('diag').innerHTML =
     group('系统', [['上次重启原因', RESET[d.reset_reason] || d.reset_reason, crashed ? 'bad' : ''], ['运行时间', duration(s.uptime)]]) +
     group('通知处理', [['蓝牙收到', d.notifications_received], ['已处理', d.notifications_handled],
-      ['跳过（已上报过）', d.notifications_skipped],
+      ['跳过（已上报过）', d.notifications_skipped], ['按规则丢弃', d.notifications_dropped],
       ['主任务', d.busy_seconds ? `忙碌 ${d.busy_seconds} 秒` : '空闲', stuck ? 'bad' : 'good'],
       ['等待处理', d.pending_tasks, d.pending_tasks > 0 && stuck ? 'bad' : '']]) +
     group('Flash 存储', store);
@@ -431,7 +458,7 @@ function renderNotifications(data) {
   });
 }
 let notifications = [], maxMessageLen = 0;
-const UPLOAD = { pending:'等待推送', delivered:'已推送', failed:'推送失败', skipped:'未推送（没有推送目标）' };
+const UPLOAD = { pending:'等待推送', delivered:'已推送', failed:'推送失败', skipped:'未推送（没有推送目标，或按规则只记录）' };
 function appName(n) { return n.app_name || n.app_id || '未知应用'; }
 function badges(n) {
   const b = [`<span class="badge">${esc(CATEGORY[n.category] || n.category)}</span>`];
@@ -544,7 +571,12 @@ function renderNotification(n) {
       ['来自设备', (n.peer_name || '-') + (n.peer_address ? ' (' + n.peer_address + ')' : '')], ['App ID', n.app_id || '-'],
       ['分类', (CATEGORY[n.category] || n.category) + (n.category_count > 1 ? `（共 ${n.category_count} 条）` : '')],
       ['操作按钮', actions || '-'], ['标记', flags || '-'], ['推送', UPLOAD[n.upload] || '-'], ['UID', n.uid]])}</div>
-`;
+    ${n.app_id ? '<div class="actions"><button id="maddrule">按此 App 添加规则</button></div>' : ''}`;
+  if (n.app_id) $('maddrule').onclick = () => {
+    closeNotification();
+    switchTab('settings');
+    configLoaded.then(() => openRuleForm(-1, { name: appName(n), apps: [n.app_id] }));
+  };
 }
 function receivedAt(n) {
   if (!n.received_time) return ago(n.received_ago);
@@ -575,7 +607,7 @@ async function loadConfig() {
   $('pwstate').textContent = c.has_password ? '已设置' : '未设置';
   $('pwstate').className = 'badge' + (c.has_password ? '' : ' gray');
   $('pwclear').style.display = c.has_password ? '' : 'none';
-  await loadTargets();
+  await Promise.all([loadTargets(), loadRules()]);
 }
 
 // ---- Push targets
@@ -710,7 +742,104 @@ async function removeTarget(slot) {
     show('tlistmsg', '已删除', true);
   } catch (e) { show('tlistmsg', e.message); }
   await loadTargets();
+  renderRules();  // Rules pointing to it
 }
+
+// ---- Filter rules
+const CATEGORY_IDS = Object.keys(CATEGORY);  // In ANCS id order
+const ACTION = { forward:'推送', record:'只记录', drop:'丢弃' };
+let rules = [], ruleHits = [], defaultAction = 'forward', defaultHits = 0, maxRules = 20, ruleEditing = -1;
+$('rcats').innerHTML = CATEGORY_IDS.map((c, i) => `<label><input type="checkbox" value="${i}"> ${CATEGORY[c]}</label>`).join('');
+async function loadRules() {
+  let data;
+  try { data = await api('/api/filters'); } catch (e) { $('rlist').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  rules = data.rules; ruleHits = data.hits || []; defaultAction = data.default_action; defaultHits = data.default_hits || 0;
+  maxRules = data.max_rules;
+  renderRules();
+}
+function ruleSummary(r) {
+  const parts = [];
+  if (r.apps.length) parts.push('App：' + r.apps.join('、'));
+  if (r.categories.length) parts.push('分类：' + r.categories.map(i => CATEGORY[CATEGORY_IDS[i]]).join('、'));
+  if (r.keywords.length) parts.push('关键词：' + r.keywords.join('、'));
+  if (r.devices.length) parts.push('设备：' + r.devices.join('、'));
+  const cond = parts.length ? parts.join('；') : '所有通知';
+  const to = r.action !== 'forward' ? ACTION[r.action] : '推送到' + (r.targets.length ? r.targets.map(targetName).join('、') : '所有目标');
+  return cond + ' → ' + to;
+}
+function renderRules() {
+  $('rcount').textContent = rules.length + ' / ' + maxRules;
+  $('radd').style.display = rules.length < maxRules ? '' : 'none';
+  $('rdefault').value = defaultAction;
+  $('rlist').innerHTML = rules.length ? rules.map((r, i) => `<div class="row${r.enabled ? '' : ' off'}">
+      <span class="name">${i + 1}. ${esc(r.name || ruleSummary(r).split(' → ')[0])}</span>
+      <span class="badge${r.action === 'drop' ? ' red' : r.action === 'record' ? ' gray' : ''}">${ACTION[r.action]}</span>
+      ${r.enabled ? `<span class="badge gray" title="本次开机以来">匹配 ${ruleHits[i] || 0} 次</span>` : '<span class="badge gray">已停用</span>'}
+      <span class="ops"><button data-rup="${i}" ${i ? '' : 'disabled'} title="上移">↑</button><button data-rdown="${i}" ${i < rules.length - 1 ? '' : 'disabled'} title="下移">↓</button>
+        <button data-renable="${i}">${r.enabled ? '停用' : '启用'}</button><button data-redit="${i}">编辑</button><button class="danger" data-rdel="${i}">删除</button></span>
+      <div class="desc">${esc(ruleSummary(r))}</div></div>`).join('')
+    : '<div class="empty">没有规则，所有通知都按下面的方式处理</div>';
+  const on = (attr, fn) => $('rlist').querySelectorAll(`[data-${attr}]`).forEach(b => b.onclick = () => fn(Number(b.dataset[attr])));
+  on('redit', i => openRuleForm(i));
+  on('rdel', i => { if (confirm('确定删除这条规则？')) { rules.splice(i, 1); saveRules('已删除'); } });
+  on('renable', i => { rules[i].enabled = !rules[i].enabled; saveRules(rules[i].enabled ? '已启用' : '已停用'); });
+  on('rup', i => { rules.splice(i - 1, 0, rules.splice(i, 1)[0]); saveRules('已调整顺序'); });
+  on('rdown', i => { rules.splice(i + 1, 0, rules.splice(i, 1)[0]); saveRules('已调整顺序'); });
+}
+async function saveRules(message) {
+  try {
+    await postJson('/api/filters', { default_action: $('rdefault').value, rules });
+    show('rmsg', message || '已保存', true);
+    await loadRules();
+    return true;
+  } catch (e) {
+    show('rmsg', e.message);
+    await loadRules();  // Back to what the device has
+    return false;
+  }
+}
+$('rdefault').onchange = () => saveRules('已保存');
+const splitList = v => v.split(/[,，\n]/).map(x => x.trim()).filter(Boolean);
+function checkedValues(id) { return [...$(id).querySelectorAll('input:checked')].map(c => Number(c.value)); }
+function setChecked(id, values) { $(id).querySelectorAll('input').forEach(c => c.checked = values.includes(Number(c.value))); }
+function updateRuleForm() { $('rtargetsrow').style.display = $('raction').value === 'forward' ? '' : 'none'; }
+$('raction').onchange = updateRuleForm;
+// index -1: a new rule, prefilled with init
+function openRuleForm(index, init) {
+  ruleEditing = index;
+  const r = index >= 0 ? rules[index] : { name:'', enabled:true, apps:[], categories:[], keywords:[], devices:[], action:'forward', targets:[], ...init };
+  $('rformtitle').textContent = index >= 0 ? `编辑规则 ${index + 1}` : '添加规则';
+  $('rname').value = r.name;
+  $('rapps').value = r.apps.join(', ');
+  $('rkeywords').value = r.keywords.join(', ');
+  $('rdevices').value = r.devices.join(', ');
+  setChecked('rcats', r.categories);
+  $('rtargets').innerHTML = targets.map((t, i) => t ? `<label><input type="checkbox" value="${i}"> ${esc(t.name)}</label>` : '').join('') ||
+    '<span class="hint">还没有推送目标</span>';
+  setChecked('rtargets', r.targets);
+  $('raction').value = r.action;
+  $('renabled').checked = r.enabled;
+  $('rformmsg').textContent = '';
+  updateRuleForm();
+  $('rform').style.display = '';
+  $('rform').scrollIntoView({ behavior:'smooth', block:'nearest' });
+}
+function closeRuleForm() { $('rform').style.display = 'none'; ruleEditing = -1; }
+$('radd').onclick = () => openRuleForm(-1);
+$('rcancel').onclick = closeRuleForm;
+$('rsave').onclick = async () => {
+  const rule = { name: $('rname').value.trim(), enabled: $('renabled').checked, apps: splitList($('rapps').value),
+    categories: checkedValues('rcats'), keywords: splitList($('rkeywords').value), devices: splitList($('rdevices').value),
+    action: $('raction').value, targets: $('raction').value === 'forward' ? checkedValues('rtargets') : [] };
+  const saved = rules.slice();
+  if (ruleEditing >= 0) rules[ruleEditing] = rule; else rules.push(rule);
+  try {
+    await postJson('/api/filters', { default_action: $('rdefault').value, rules });
+    closeRuleForm();
+    show('rmsg', '已保存', true);
+  } catch (e) { rules = saved; show('rformmsg', e.message); return; }
+  loadRules();
+};
 
 $('hsave').onclick = async () => {
   try { await postJson('/api/config', { history_size: parseInt($('hsize').value, 10) }); show('hmsg', '已保存', true); loadConfig(); }

@@ -49,6 +49,7 @@ public:
         uint32_t notifications_received;  // From BLE
         uint32_t notifications_handled;   // Recorded and sent to the webhook
         uint32_t notifications_skipped;   // Replays already reported
+        uint32_t notifications_dropped;   // By a filter rule
         int pending_tasks;                // Waiting for the main task
         int busy_seconds;                 // Time the main task spent on the current task batch, 0 when idle
     };
@@ -62,12 +63,15 @@ private:
     void LoadReportedNotifications();
     void ResendPendingNotifications();
     void OnNotification(const AncsNotification& notification);
+    // Webhook target slots (bit mask) a notification goes to, by the filter rules
+    uint32_t GetWebhookTargets(const AncsNotification& notification);
 
     std::mutex mutex_;
     std::deque<std::function<void()>> main_tasks_;
     std::atomic<uint32_t> notifications_received_ = 0;
     std::atomic<uint32_t> notifications_handled_ = 0;
     std::atomic<uint32_t> notifications_skipped_ = 0;
+    std::atomic<uint32_t> notifications_dropped_ = 0;
     std::atomic<int64_t> busy_since_us_ = 0;  // 0 when idle
     EventGroupHandle_t event_group_ = nullptr;
     std::unique_ptr<Button> boot_button_;

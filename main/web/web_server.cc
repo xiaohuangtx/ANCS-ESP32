@@ -5,6 +5,7 @@
 #include "webhook_client.h"
 #include "notification_history.h"
 #include "notification_store.h"
+#include "notification_filter.h"
 #include "time_sync.h"
 #include "encoding.h"
 #include "log_buffer.h"
@@ -134,6 +135,8 @@ void WebServer::Start() {
         {"/api/webhooks", HTTP_POST, HandleSetWebhook, this},
         {"/api/webhooks", HTTP_DELETE, HandleRemoveWebhook, this},
         {"/api/webhooks/test", HTTP_POST, HandleWebhookTest, this},
+        {"/api/filters", HTTP_GET, HandleGetFilters, this},
+        {"/api/filters", HTTP_POST, HandleSetFilters, this},
         {"/api/ota", HTTP_POST, HandleOta, this},
         {"/api/reboot", HTTP_POST, HandleReboot, this},
         {"/api/ble/clear-bonds", HTTP_POST, HandleClearBonds, this},
@@ -295,6 +298,7 @@ esp_err_t WebServer::HandleStatus(httpd_req_t* req) {
     cJSON_AddNumberToObject(diag_json, "notifications_received", diag.notifications_received);
     cJSON_AddNumberToObject(diag_json, "notifications_handled", diag.notifications_handled);
     cJSON_AddNumberToObject(diag_json, "notifications_skipped", diag.notifications_skipped);
+    cJSON_AddNumberToObject(diag_json, "notifications_dropped", diag.notifications_dropped);
     cJSON_AddNumberToObject(diag_json, "pending_tasks", diag.pending_tasks);
     cJSON_AddNumberToObject(diag_json, "busy_seconds", diag.busy_seconds);
     auto& store = NotificationStore::GetInstance();
@@ -600,6 +604,30 @@ esp_err_t WebServer::HandleWebhookTest(httpd_req_t* req) {
     cJSON_AddNumberToObject(response, "status", result.status);
     cJSON_AddStringToObject(response, "error", result.error.c_str());
     return SendJson(req, response);
+}
+
+esp_err_t WebServer::HandleGetFilters(httpd_req_t* req) {
+    if (!Self(req)->CheckAuth(req)) {
+        return ESP_OK;
+    }
+    return SendJson(req, NotificationFilter::GetInstance().ToCJson());
+}
+
+// {"default_action", "rules": [...]}, replaces all rules (see NotificationFilter)
+esp_err_t WebServer::HandleSetFilters(httpd_req_t* req) {
+    if (!Self(req)->CheckAuth(req)) {
+        return ESP_OK;
+    }
+    if (req->content_len > kMaxJsonBodySize) {
+        return SendError(req, "400 Bad Request", "规则内容太多，请减少规则或关键词");
+    }
+    cJSON* json = ReadJsonBody(req);
+    if (json == nullptr) {
+        return SendError(req, "400 Bad Request", "请求格式错误");
+    }
+    std::string error = NotificationFilter::GetInstance().Set(json);
+    cJSON_Delete(json);
+    return SendResult(req, error);
 }
 
 esp_err_t WebServer::HandleReboot(httpd_req_t* req) {

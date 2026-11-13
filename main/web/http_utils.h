@@ -27,6 +27,8 @@ bool HasContentType(httpd_req_t* req, const char* type);
 
 // httpd_req_recv() may return less than asked for
 bool RecvExact(httpd_req_t* req, char* buffer, size_t length);
+// Filter rules are stored up to 4000 bytes, as JSON they may be sent with some more
+constexpr size_t kMaxJsonBodySize = 8192;
 // The caller deletes the result; nullptr if the body is missing, too large, not
 // JSON or not sent as application/json
 cJSON* ReadJsonBody(httpd_req_t* req);
