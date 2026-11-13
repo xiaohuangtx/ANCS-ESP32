@@ -8,6 +8,7 @@
 #include "log_buffer.h"
 #include "settings.h"
 #include "http_utils.h"
+#include "ancs_defs.h"
 
 #include <esp_log.h>
 #include <esp_ota_ops.h>
@@ -41,6 +42,9 @@ static const char* ResetReasonName(esp_reset_reason_t reason) {
     }
 }
 
+// Leave sockets for the webhook client (CONFIG_LWIP_MAX_SOCKETS is 10). Every
+// open admin page keeps one for /api/events.
+static constexpr int kMaxOpenSockets = 5;
 static constexpr size_t kOtaBufferSize = 4096;
 // Image header + first segment header + app descriptor, enough to identify the image
 static constexpr size_t kMinImageSize =
@@ -116,8 +120,7 @@ void WebServer::Start() {
     // Large enough for the webhook test, which runs a TLS handshake in this task
     config.stack_size = 8192;
     config.max_uri_handlers = 20;
-    // Leave sockets for the webhook client (CONFIG_LWIP_MAX_SOCKETS is 10)
-    config.max_open_sockets = 4;
+    config.max_open_sockets = kMaxOpenSockets;
     config.lru_purge_enable = true;
     config.recv_wait_timeout = 10;
     config.send_wait_timeout = 10;
@@ -135,6 +138,9 @@ void WebServer::Start() {
         {"/api/logs", HTTP_GET, HandleLogs, this},
         {"/api/notifications", HTTP_GET, HandleGetNotifications, this},
         {"/api/notifications", HTTP_DELETE, HandleClearNotifications, this},
+        {"/api/notifications/action", HTTP_POST, HandleNotificationAction, this},
+        {.uri = "/api/events", .method = HTTP_GET, .handler = HandleEvents, .user_ctx = this,
+         .is_websocket = true, .ws_pre_handshake_cb = HandleEventsHandshake},
         {"/api/config", HTTP_GET, HandleGetConfig, this},
         {"/api/config", HTTP_POST, HandleSetConfig, this},
         {"/api/webhook/test", HTTP_POST, HandleWebhookTest, this},
@@ -150,6 +156,12 @@ void WebServer::Start() {
     for (auto& uri : uris) {
         httpd_register_uri_handler(server_, &uri);
     }
+    {
+        std::lock_guard<std::mutex> lock(events_mutex_);
+        events_server_ = server_;
+        // A signal still queued when the server stopped was dropped with it
+        notifications_changed_queued_ = false;
+    }
 
     ESP_LOGI(TAG, "Admin page: http://%s/%s", WifiService::GetInstance().GetIpAddress().c_str(),
              HasPassword() ? " (password protected)" : "");
@@ -160,6 +172,10 @@ void WebServer::Stop() {
     std::lock_guard<std::mutex> lock(server_mutex_);
     if (server_ == nullptr) {
         return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(events_mutex_);
+        events_server_ = nullptr;
     }
     httpd_stop(server_);
     server_ = nullptr;
@@ -337,6 +353,112 @@ esp_err_t WebServer::HandleClearNotifications(httpd_req_t* req) {
     }
     NotificationHistory::GetInstance().Clear();
     return SendOk(req);
+}
+
+// {"id", "action": "positive" | "negative"}. The iPhone then removes or
+// updates the notification, which the page learns from /api/events.
+esp_err_t WebServer::HandleNotificationAction(httpd_req_t* req) {
+    if (!Self(req)->CheckAuth(req)) {
+        return ESP_OK;
+    }
+    cJSON* json = ReadJsonBody(req);
+    cJSON* id = json ? cJSON_GetObjectItem(json, "id") : nullptr;
+    const char* action = json ? GetJsonString(json, "action") : nullptr;
+    bool positive = action != nullptr && strcmp(action, "positive") == 0;
+    bool negative = action != nullptr && strcmp(action, "negative") == 0;
+    if (!cJSON_IsNumber(id) || (!positive && !negative)) {
+        cJSON_Delete(json);
+        return SendError(req, "400 Bad Request", "请求格式错误");
+    }
+    uint32_t record_id = (uint32_t)id->valuedouble;
+    cJSON_Delete(json);
+
+    auto notification = NotificationHistory::GetInstance().GetActive(record_id);
+    if (!notification) {
+        return SendError(req, "409 Conflict", "通知已在 iPhone 上清除，或 iPhone 已断开");
+    }
+    if (!(notification->event_flags & (positive ? kAncsFlagPositiveAction : kAncsFlagNegativeAction))) {
+        return SendError(req, "400 Bad Request", "这条通知没有该操作");
+    }
+    if (!BleManager::GetInstance().PerformAction(notification->conn_handle, notification->uid,
+                                                 positive ? kAncsActionPositive : kAncsActionNegative)) {
+        return SendError(req, "409 Conflict", "iPhone 已断开");
+    }
+    ESP_LOGI(TAG, "%s action requested on uid=%lu from %s", positive ? "Positive" : "Negative",
+             (unsigned long)notification->uid, notification->peer_name.c_str());
+    return SendOk(req);
+}
+
+// Before the WebSocket upgrade. Any site can open a WebSocket to the device
+// (there is no CORS for them), so check that the admin page itself asks.
+esp_err_t WebServer::HandleEventsHandshake(httpd_req_t* req) {
+    if (!Self(req)->CheckAuth(req)) {
+        return ESP_FAIL;
+    }
+    std::string origin = GetHeader(req, "Origin");
+    size_t scheme_end = origin.find("://");
+    if (scheme_end == std::string::npos || origin.substr(scheme_end + 3) != GetHeader(req, "Host")) {
+        ESP_LOGW(TAG, "Rejected WebSocket from origin \"%s\"", origin.c_str());
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Forbidden");
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+// Frames from the page: only keepalives, which also keep this socket from
+// being closed as the least recently used one
+esp_err_t WebServer::HandleEvents(httpd_req_t* req) {
+    if (req->method == HTTP_GET) {
+        return ESP_OK;  // Handshake, on ESP-IDF versions that pass it here
+    }
+    httpd_ws_frame_t frame = {};
+    esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);
+    if (err != ESP_OK || frame.len == 0) {
+        return err;
+    }
+    uint8_t payload[16];
+    if (frame.len > sizeof(payload)) {
+        return ESP_FAIL;
+    }
+    frame.payload = payload;
+    return httpd_ws_recv_frame(req, &frame, frame.len);
+}
+
+void WebServer::NotifyNotificationsChanged() {
+    std::lock_guard<std::mutex> lock(events_mutex_);
+    if (events_server_ == nullptr || notifications_changed_queued_.exchange(true)) {
+        return;
+    }
+    if (httpd_queue_work(events_server_, SendNotificationsChanged, events_server_) != ESP_OK) {
+        notifications_changed_queued_ = false;
+    }
+}
+
+// Runs in the server task
+void WebServer::SendNotificationsChanged(void* arg) {
+    auto server = static_cast<httpd_handle_t>(arg);
+    // Cleared first, so a change from now on queues another signal
+    GetInstance().notifications_changed_queued_ = false;
+
+    static const char kMessage[] = "{\"type\":\"notifications\"}";
+    httpd_ws_frame_t frame = {};
+    frame.final = true;
+    frame.type = HTTPD_WS_TYPE_TEXT;
+    frame.payload = (uint8_t*)kMessage;
+    frame.len = sizeof(kMessage) - 1;
+
+    int fds[kMaxOpenSockets];
+    size_t count = kMaxOpenSockets;
+    if (httpd_get_client_list(server, &count, fds) != ESP_OK) {
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (httpd_ws_get_fd_info(server, fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET &&
+            httpd_ws_send_frame_async(server, fds[i], &frame) != ESP_OK) {
+            // The page reconnects
+            httpd_sess_trigger_close(server, fds[i]);
+        }
+    }
 }
 
 esp_err_t WebServer::HandleGetConfig(httpd_req_t* req) {

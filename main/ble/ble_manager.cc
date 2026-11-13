@@ -277,7 +277,7 @@ int BleManager::HandleGapEvent(struct ble_gap_event* event) {
             ESP_LOGI(TAG, "Connected (%d/%d)", GetConnectionCount(), GetMaxConnections());
             PrintConnection(event->connect.conn_handle);
             if (connection_callback_) {
-                connection_callback_(true, GetConnectionCount());
+                connection_callback_(event->connect.conn_handle, true, GetConnectionCount());
             }
             // Advertising stops when a connection is established; keep accepting more devices
             if (GetConnectionCount() < GetMaxConnections()) {
@@ -314,7 +314,7 @@ int BleManager::HandleGapEvent(struct ble_gap_event* event) {
             ESP_LOGI(TAG, "Disconnected, conn=%d reason=0x%x (%d/%d)", event->disconnect.conn.conn_handle,
                      event->disconnect.reason, GetConnectionCount(), GetMaxConnections());
             if (link != nullptr && connection_callback_) {
-                connection_callback_(false, GetConnectionCount());
+                connection_callback_(event->disconnect.conn.conn_handle, false, GetConnectionCount());
             }
             ScheduleAdvertising();
             return 0;

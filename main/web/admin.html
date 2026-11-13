@@ -76,10 +76,25 @@ button:disabled { opacity:.5; cursor:not-allowed; }
 .wifi .ops { margin-left:auto; display:flex; gap:8px; }
 .wifi .ops button { padding:4px 12px; font-size:13px; }
 .check { display:flex; align-items:center; gap:6px; margin-top:8px; color:var(--muted); font-size:13px; }
+header .live { margin-left:auto; color:#aab; font-size:12px; }
+header .live::before { content:''; display:inline-block; width:8px; height:8px; border-radius:50%; background:#667; margin-right:6px; }
+header .live.on::before { background:var(--ok); }
+.nacts { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+.nacts:empty { display:none; }
+.nacts button { padding:4px 14px; font-size:13px; }
+.toasts { position:fixed; top:58px; right:12px; z-index:20; display:flex; flex-direction:column; gap:8px; width:340px; max-width:calc(100vw - 24px); }
+.toast { background:#fff; border-radius:10px; padding:12px 14px; box-shadow:0 6px 24px rgba(0,0,0,.18); cursor:pointer; animation:toastin .2s ease-out; }
+.toast .head { display:flex; gap:8px; align-items:center; }
+.toast .app { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.toast .close { margin-left:auto; border:none; background:none; padding:0 2px; font-size:20px; line-height:1; color:var(--muted); }
+.toast .title { margin-top:4px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.toast .body { margin-top:2px; white-space:pre-wrap; word-break:break-word; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; }
+@keyframes toastin { from { opacity:0; transform:translateX(16px); } }
 </style>
 </head>
 <body>
-<header><h1 id="devname">ANCS-ESP32</h1><span class="ver" id="hdrver"></span></header>
+<header><h1 id="devname">ANCS-ESP32</h1><span class="ver" id="hdrver"></span><span class="live" id="live"></span></header>
+<div class="toasts" id="toasts"></div>
 <nav>
   <a data-tab="overview" class="active">概览</a>
   <a data-tab="notifications">通知记录</a>
@@ -239,7 +254,10 @@ function switchTab(name) {
   if (name === 'system') { followLog = true; loadDiag(); diagTimer = setInterval(loadDiag, 10000); }
   if (name === 'settings') loadConfig();
   if (name === 'wifi') loadWifi();
-  if (refresh) { refresh(); timer = setInterval(refresh, { notifications: 5000, system: 3000 }[name] || 10000); }
+  if (refresh) {
+    refresh();
+    timer = setInterval(name === 'notifications' ? pollNotifications : refresh, { notifications: 5000, system: 3000 }[name] || 10000);
+  }
 }
 document.querySelectorAll('nav a').forEach(a => a.onclick = () => switchTab(a.dataset.tab));
 
@@ -343,12 +361,32 @@ $('ldownload').onclick = () => {
   a.click(); URL.revokeObjectURL(a.href);
 };
 
+// Changes come in bursts (e.g. iOS replaying Notification Center after
+// reconnecting): one request at a time, plus one more for what came meanwhile
+let notifLoading = false, notifReload = false, notifLoaded = 0;
 async function loadNotifications() {
-  let data;
-  try { data = await api('/api/notifications'); } catch (e) { $('nlist').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  if (notifLoading) { notifReload = true; return; }
+  notifLoading = true;
+  try {
+    let data;
+    try { data = await api('/api/notifications'); } catch (e) { $('nlist').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    notifLoaded = Date.now();
+    notifications = data.items; maxMessageLen = data.max_message_len;
+    renderNotifications(data);
+    updateToasts();
+    updateOpenNotification();
+  } finally {
+    notifLoading = false;
+    if (notifReload) { notifReload = false; loadNotifications(); }
+  }
+}
+// While the device pushes changes, polling only keeps "x 分钟前" up to date
+function pollNotifications() {
+  if (!eventsOpen() || Date.now() - notifLoaded >= 30000) loadNotifications();
+}
+function renderNotifications(data) {
   $('ncount').textContent = data.items.length + ' / ' + data.capacity;
   if (!data.items.length) { $('nlist').innerHTML = '<div class="empty">暂无通知</div>'; return; }
-  notifications = data.items; maxMessageLen = data.max_message_len;
   $('nlist').innerHTML = data.items.map((n, i) => {
     const date = n.date ? n.date.replace('T', ' ').slice(5, 16) : '';
     const title = [n.title, n.subtitle].filter(Boolean).join(' · ');
@@ -357,6 +395,7 @@ async function loadNotifications() {
       ${title ? `<div class="title">${esc(title)}</div>` : ''}
       ${n.message ? `<div class="body">${esc(n.message)}</div>` : ''}
       <div class="meta">来自 ${esc(n.peer_name || n.peer_address)}${n.message_truncated ? ' · 内容已被 iOS 截断' : ''}<span class="more"></span></div>
+      ${actionButtons(n)}
     </div>`;
   }).join('');
   // Offer "全文" only where the preview is clipped (title on one line, body on 3 lines)
@@ -378,7 +417,94 @@ function badges(n) {
   if (n.upload === 'failed') b.push('<span class="badge red">上传失败</span>');
   return b.join(' ');
 }
+// Same notification across "modified" events, which give it a new id
+function nkey(n) { return n.peer_address + '/' + n.uid; }
+
+// Only while the notification is still on a connected iPhone. iOS normally
+// removes or updates it after an action, and the page follows through /api/events.
+const ACTION_FALLBACK = { positive:'确定', negative:'清除' };
+function actionButtons(n) {
+  const buttons = !n.active ? [] : ['positive', 'negative'].filter(a => n.flags[a + '_action']).map(a =>
+    `<button class="${a === 'positive' ? 'primary' : ''}" data-act="${a}" data-id="${n.id}">${esc(n[a + '_action'] || ACTION_FALLBACK[a])}</button>`);
+  return `<div class="nacts">${buttons.join('')}</div>`;
+}
+// Capture phase, so the click does not also open the notification underneath
+document.addEventListener('click', async e => {
+  const b = e.target.closest('[data-act]');
+  if (!b) return;
+  e.stopPropagation();
+  b.disabled = true;
+  try {
+    await postJson('/api/notifications/action', { id: Number(b.dataset.id), action: b.dataset.act });
+    b.textContent = '已发送';
+  } catch (err) { alert(err.message); loadNotifications(); }
+}, true);
+
+// Toasts for new notifications, on every tab
+const TOAST_MAX = 3, TOAST_MS = 8000;
+let seenNotifications = null;  // id/key of every listed notification, null before the first load
+function updateToasts() {
+  const ids = new Set(notifications.map(n => n.id + '/' + nkey(n)));
+  // Not on the first load, nor for the replay of Notification Center after reconnecting
+  const fresh = seenNotifications ? notifications.filter(n => !seenNotifications.has(n.id + '/' + nkey(n)) && !n.flags.pre_existing) : [];
+  seenNotifications = ids;
+  fresh.slice(0, TOAST_MAX).reverse().forEach(showToast);
+  // Follow the toasts already shown: their buttons, and incoming calls that ended
+  $('toasts').querySelectorAll('.toast').forEach(t => {
+    const n = notifications.find(n => nkey(n) === t.dataset.key);
+    if (t.dataset.sticky && !(n && n.active)) return t.remove();
+    t.querySelector('.nacts').outerHTML = n ? actionButtons(n) : '<div class="nacts"></div>';
+  });
+}
+function showToast(n) {
+  const box = $('toasts');
+  box.querySelectorAll('.toast').forEach(t => { if (t.dataset.key === nkey(n)) t.remove(); });
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.dataset.key = nkey(n);
+  const title = [n.title, n.subtitle].filter(Boolean).join(' · ');
+  t.innerHTML = `<div class="head"><span class="app">${esc(appName(n))}</span><span class="badge">${esc(CATEGORY[n.category] || n.category)}</span><button class="close" title="关闭">×</button></div>
+    ${title ? `<div class="title">${esc(title)}</div>` : ''}
+    ${n.message ? `<div class="body">${esc(n.message)}</div>` : ''}
+    ${actionButtons(n)}`;
+  t.onclick = e => {
+    if (!e.target.closest('.close')) openNotification(notifications.find(x => nkey(x) === t.dataset.key) || n);
+    t.remove();
+  };
+  // An incoming call stays until it is answered, declined or over
+  if (n.category === 'IncomingCall' && n.active) {
+    t.dataset.sticky = '1';
+  } else {
+    let hide;
+    const arm = () => { clearTimeout(hide); hide = setTimeout(() => t.remove(), TOAST_MS); };
+    t.onmouseenter = () => clearTimeout(hide);
+    t.onmouseleave = arm;
+    arm();
+  }
+  box.prepend(t);
+  while (box.children.length > TOAST_MAX) box.lastElementChild.remove();
+}
+
+let openKey = null, openSignature = '';
+function signature(n) { return JSON.stringify({ ...n, received_ago: 0 }); }
 function openNotification(n) {
+  openKey = nkey(n);
+  renderNotification(n);
+  $('mcontent').scrollTop = 0;
+  $('nmodal').classList.add('open');
+}
+// Keep the open notification current, e.g. its buttons
+function updateOpenNotification() {
+  if (!openKey) return;
+  const n = notifications.find(n => nkey(n) === openKey);
+  if (!n) { $('mactions').innerHTML = ''; return; }  // Cleared from the list
+  if (signature(n) === openSignature) return;  // Unchanged: keep any text selection
+  const top = $('mcontent').scrollTop;
+  renderNotification(n);
+  $('mcontent').scrollTop = top;
+}
+function renderNotification(n) {
+  openSignature = signature(n);
   $('mapp').textContent = appName(n);
   $('mbadges').innerHTML = badges(n);
   const actions = [n.positive_action, n.negative_action].filter(Boolean).join(' / ');
@@ -388,14 +514,13 @@ function openNotification(n) {
     ${n.subtitle ? `<div class="subtitle">${esc(n.subtitle)}</div>` : ''}
     <div class="body">${n.message ? esc(n.message) : '<span style="color:var(--muted)">（无内容）</span>'}</div>
     ${n.message_truncated ? `<div class="warn">内容已被 iOS 截断：设备每条通知最多获取 ${maxMessageLen} 字节（原始长度 ${n.message_size}），超出部分没有发送到设备，无法显示。</div>` : ''}
+    <div id="mactions">${actionButtons(n)}</div>
     <div class="grid">${kv([['时间', n.date ? n.date.replace('T', ' ') : '-'], ['收到', ago(n.received_ago)],
       ['来自设备', (n.peer_name || '-') + (n.peer_address ? ' (' + n.peer_address + ')' : '')], ['App ID', n.app_id || '-'],
       ['分类', (CATEGORY[n.category] || n.category) + (n.category_count > 1 ? `（共 ${n.category_count} 条）` : '')],
       ['操作按钮', actions || '-'], ['标记', flags || '-'], ['Webhook', UPLOAD[n.upload] || '-'], ['UID', n.uid]])}</div>`;
-  $('mcontent').scrollTop = 0;
-  $('nmodal').classList.add('open');
 }
-function closeNotification() { $('nmodal').classList.remove('open'); }
+function closeNotification() { $('nmodal').classList.remove('open'); openKey = null; }
 $('mclose').onclick = closeNotification;
 $('nmodal').onclick = e => { if (e.target === $('nmodal')) closeNotification(); };
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeNotification(); });
@@ -618,6 +743,43 @@ $('wificfg').onclick = async () => {
   catch (e) { show('sysmsg', e.message); }
 };
 
+// Live updates: the device only signals that something changed, the page
+// fetches the data itself. Without the WebSocket (e.g. blocked by a proxy) the
+// notification tab falls back to polling.
+let events = null, eventsRetry = 1000;
+function eventsOpen() { return events !== null && events.readyState === WebSocket.OPEN; }
+function setLive(on) {
+  $('live').className = 'live' + (on ? ' on' : '');
+  $('live').textContent = on ? '实时' : '定时刷新';
+  $('live').title = on ? '新通知会立即显示' : '实时连接已断开，正在重连；通知记录页每 5 秒刷新';
+}
+function connectEvents() {
+  const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/api/events');
+  let ping = null;
+  events = ws;
+  ws.onopen = () => {
+    eventsRetry = 1000;
+    setLive(true);
+    // Keeps the device from closing the socket as idle when it runs out of sockets
+    ping = setInterval(() => ws.send('ping'), 20000);
+    loadNotifications();  // Whatever changed while disconnected
+  };
+  ws.onmessage = e => {
+    let m = {};
+    try { m = JSON.parse(e.data); } catch (err) {}
+    if (m.type === 'notifications') loadNotifications();
+  };
+  ws.onclose = () => {
+    clearInterval(ping);
+    events = null;
+    setLive(false);
+    setTimeout(connectEvents, eventsRetry);
+    eventsRetry = Math.min(eventsRetry * 2, 30000);
+  };
+}
+
+setLive(false);
+connectEvents();
 switchTab('overview');
 </script>
 </body>

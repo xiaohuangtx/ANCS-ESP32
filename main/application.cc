@@ -61,7 +61,9 @@ void Application::Initialize() {
 
     // Reload what survived the reboot, so a replay of Notification Center
     // is still recognized
-    NotificationHistory::GetInstance();
+    NotificationHistory::GetInstance().SetChangeCallback([]() {
+        WebServer::GetInstance().NotifyNotificationsChanged();
+    });
     LoadReportedNotifications();
 
     // Webhook task waits for Wi-Fi before sending anything
@@ -92,13 +94,21 @@ void Application::Initialize() {
 
     // BLE: advertise and wait for the iPhone
     auto& ble = BleManager::GetInstance();
-    ble.SetConnectionCallback([](bool connected, int connection_count) {
+    ble.SetConnectionCallback([this](uint16_t conn_handle, bool connected, int connection_count) {
         ESP_LOGI(TAG, "Device %s, %d/%d connected", connected ? "connected" : "disconnected",
                  connection_count, BleManager::GetInstance().GetMaxConnections());
+        if (!connected) {
+            // After the notifications of this connection still waiting in the main task
+            Schedule([conn_handle]() {
+                NotificationHistory::GetInstance().OnDisconnected(conn_handle);
+            });
+        }
     });
     ble.SetNotificationCallback([this](const AncsNotification& notification) {
         // Called from the NimBLE host task: hand over to the main task
-        notifications_received_++;
+        if (notification.event_id != kAncsEventRemoved) {
+            notifications_received_++;
+        }
         Schedule([this, notification]() {
             OnNotification(notification);
         });
@@ -146,6 +156,12 @@ void Application::ResendPendingNotifications() {
 }
 
 void Application::OnNotification(const AncsNotification& notification) {
+    if (notification.event_id == kAncsEventRemoved) {
+        // Not reported, only its actions on the admin page go away
+        NotificationHistory::GetInstance().SetRemoved(notification);
+        return;
+    }
+
     // iOS replays Notification Center, flagged PreExisting, on every connection.
     // Drop the ones already reported over an earlier connection; pre-existing
     // ones not seen yet (e.g. received while disconnected) are still reported.
@@ -156,6 +172,8 @@ void Application::OnNotification(const AncsNotification& notification) {
         ESP_LOGI(TAG, "Skipping pre-existing notification uid=%lu from %s, already reported",
                  (unsigned long)notification.uid, notification.peer_name.c_str());
         notifications_skipped_++;
+        // Still in Notification Center, so its actions work again
+        NotificationHistory::GetInstance().Reactivate(notification);
         return;
     }
     if (!reported) {
