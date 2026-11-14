@@ -142,7 +142,7 @@ config WEB_ADMIN_PASSWORD
     default ""
     help
         If set, the admin page asks for HTTP Basic auth (user "admin").
-        Leave empty for no password. Can be changed on the page; the value is
+        Leave empty for no password, at most 64 bytes. Can be changed on the page; the value is
         stored in NVS (namespace "web", key "password").
 
 endmenu

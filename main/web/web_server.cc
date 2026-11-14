@@ -187,10 +187,15 @@ void WebServer::SetPassword(const std::string& password) {
     settings.SetString("password", password);
 }
 
+static constexpr size_t kMaxHeaderLength = 255;
+// "Basic " + base64("admin:" + password) must fit
+static_assert(6 + (6 + WebServer::kMaxPasswordLength + 2) / 3 * 4 <= kMaxHeaderLength,
+              "kMaxPasswordLength too large for the Authorization header");
+
 // "" if the header is missing or too long
 static std::string GetHeader(httpd_req_t* req, const char* name) {
     size_t length = httpd_req_get_hdr_value_len(req, name);
-    if (length == 0 || length >= 256) {
+    if (length == 0 || length > kMaxHeaderLength) {
         return "";
     }
     std::string value(length + 1, '\0');
@@ -510,6 +515,8 @@ esp_err_t WebServer::HandleSetConfig(httpd_req_t* req) {
     }
     if (password != nullptr && !cJSON_IsString(password)) {
         error = "密码格式错误";
+    } else if (password != nullptr && strlen(password->valuestring) > kMaxPasswordLength) {
+        error = "密码最多 " + std::to_string(kMaxPasswordLength) + " 字节（一个汉字占 3 字节）";
     }
     if (!error.empty()) {
         cJSON_Delete(json);

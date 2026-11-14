@@ -125,7 +125,7 @@ Actions  : [] / [清除]
   - 运行日志：串口输出（`ESP_LOGx` 和 `printf`）的最近 32KB，保存在内存中，按级别着色，打开时每 3 秒只拉取新增部分，可下载。`app_main` 之前的启动信息只在串口上
   - 重启、清除蓝牙配对、重新配网
 
-默认没有密码。设置管理密码后浏览器会弹出登录框，用户名 `admin`。推送目标已保存的 Authorization、加签密钥、Chat ID 不会在页面上回显。
+默认没有密码。设置管理密码后浏览器会弹出登录框，用户名 `admin`，密码最多 64 字节（一个汉字占 3 字节）。推送目标已保存的 Authorization、加签密钥、Chat ID 不会在页面上回显。
 
 用脚本调用接口时，JSON 请求须带 `Content-Type: application/json`，OTA 须带 `Content-Type: application/octet-stream`。也可在 menuconfig `ANCS-ESP32 Configuration > Admin web page` 中设置默认密码和默认保存条数（页面上修改的值保存在 NVS 中，优先级更高）。
 

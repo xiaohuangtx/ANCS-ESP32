@@ -184,8 +184,8 @@ header .live.on::before { background:var(--ok); }
   <div class="card">
     <h2>管理密码 <span class="badge" id="pwstate"></span></h2>
     <div class="hint">设置后访问本页面需要登录，用户名为 admin。</div>
-    <label>新密码</label><input type="password" id="pw1" autocomplete="new-password">
-    <label>确认新密码</label><input type="password" id="pw2" autocomplete="new-password">
+    <label>新密码</label><input type="password" id="pw1" maxlength="64" autocomplete="new-password">
+    <label>确认新密码</label><input type="password" id="pw2" maxlength="64" autocomplete="new-password">
     <div class="actions"><button class="primary" id="pwsave">设置密码</button><button class="danger" id="pwclear">取消密码</button><span class="msg" id="pwmsg"></span></div>
   </div>
 </section>
@@ -861,6 +861,8 @@ $('pwsave').onclick = () => {
   const p1 = $('pw1').value, p2 = $('pw2').value;
   if (!p1) return show('pwmsg', '请输入新密码');
   if (p1 !== p2) return show('pwmsg', '两次输入的密码不一致');
+  // The device counts UTF-8 bytes, maxlength counts characters
+  if (new TextEncoder().encode(p1).length > 64) return show('pwmsg', '密码最多 64 字节（一个汉字占 3 字节）');
   setPassword(p1);
 };
 $('pwclear').onclick = () => { if (confirm('取消密码后任何人都能访问本页面，确定？')) setPassword(''); };

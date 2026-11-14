@@ -45,6 +45,10 @@ public:
     // Signals sent close together are merged into one.
     void NotifyNotificationsChanged();
 
+    // In bytes (UTF-8). Longer passwords would not fit in the Authorization
+    // header CheckAuth accepts, which would lock the admin out.
+    static constexpr size_t kMaxPasswordLength = 64;
+
 private:
     WebServer() = default;
 
