@@ -20,8 +20,9 @@
  *
  * The iPhone is the GATT server (Notification Provider), the ESP32 is the
  * GATT client (Notification Consumer). Flow:
- *   1. Link encrypted -> read the peer's device name and current time (Current
- *      Time Service, handed to TimeSync) -> discover ANCS service and its 3
+ *   1. Link encrypted -> read the peer's device name, current time (Current
+ *      Time Service, handed to TimeSync) and battery level (Battery Service,
+ *      subscribed for updates) -> discover ANCS service and its 3
  *      characteristics
  *   2. Subscribe Data Source, then Notification Source
  *   3. Notification Source event -> write Get Notification Attributes to the
@@ -35,6 +36,13 @@
 class AncsClient {
 public:
     using NotificationCallback = std::function<void(const AncsNotification&)>;
+
+    // What is known about the connected device
+    struct PeerInfo {
+        std::string name;
+        std::string address;
+        int battery_level = -1;  // 0-100, -1 if unknown
+    };
 
     AncsClient() = default;
     AncsClient(const AncsClient&) = delete;
@@ -54,6 +62,8 @@ public:
     bool IsReady() const { return state_ == State::kReady; }
     uint16_t GetConnHandle() const { return conn_handle_; }
     static const ble_uuid128_t& ServiceUuid();
+    // Thread-safe
+    PeerInfo GetPeerInfo() const;
 
     // Thread-safe: trigger the positive (e.g. answer) or negative (e.g. decline) action
     void PerformAction(uint32_t uid, AncsActionId action);
@@ -64,6 +74,11 @@ private:
         kReadingPeerName,
         kReadingCurrentTime,
         kReadingLocalTimeInfo,
+        kDiscoveringBatteryService,
+        kDiscoveringBatteryLevel,
+        kReadingBatteryLevel,
+        kDiscoveringBatteryCccd,
+        kSubscribingBatteryLevel,
         kDiscoveringService,
         kDiscoveringCharacteristics,
         kDiscoveringDescriptors,
@@ -90,6 +105,9 @@ private:
     void ReadPeerName();
     void ReadTime(State state);
     void OnPeerInfoRead();
+    void DiscoverBatteryService();
+    void OnBatteryDone();
+    void SetBatteryLevel(const uint8_t* data, size_t len);
     void DiscoverService();
     void ScheduleRetry();
     void DiscoverDescriptors(uint16_t val_handle);
@@ -98,6 +116,11 @@ private:
 
     int HandlePeerNameRead(const struct ble_gatt_error* error, struct ble_gatt_attr* attr);
     int HandleTimeRead(const struct ble_gatt_error* error, struct ble_gatt_attr* attr);
+    int HandleBatteryServiceDiscovered(const struct ble_gatt_error* error, const struct ble_gatt_svc* service);
+    int HandleBatteryLevelDiscovered(const struct ble_gatt_error* error, const struct ble_gatt_chr* chr);
+    int HandleBatteryLevelRead(const struct ble_gatt_error* error, struct ble_gatt_attr* attr);
+    int HandleBatteryCccdDiscovered(const struct ble_gatt_error* error, const struct ble_gatt_dsc* dsc);
+    int HandleBatteryCccdWritten(const struct ble_gatt_error* error);
     int HandleServiceDiscovered(const struct ble_gatt_error* error, const struct ble_gatt_svc* service);
     int HandleCharacteristicDiscovered(const struct ble_gatt_error* error, const struct ble_gatt_chr* chr);
     int HandleDescriptorDiscovered(const struct ble_gatt_error* error, uint16_t chr_val_handle, const struct ble_gatt_dsc* dsc);
@@ -131,6 +154,16 @@ private:
                               struct ble_gatt_attr* attr, void* arg);
     static int OnTimeRead(uint16_t conn_handle, const struct ble_gatt_error* error,
                           struct ble_gatt_attr* attr, void* arg);
+    static int OnBatteryServiceDiscovered(uint16_t conn_handle, const struct ble_gatt_error* error,
+                                          const struct ble_gatt_svc* service, void* arg);
+    static int OnBatteryLevelDiscovered(uint16_t conn_handle, const struct ble_gatt_error* error,
+                                        const struct ble_gatt_chr* chr, void* arg);
+    static int OnBatteryLevelRead(uint16_t conn_handle, const struct ble_gatt_error* error,
+                                  struct ble_gatt_attr* attr, void* arg);
+    static int OnBatteryCccdDiscovered(uint16_t conn_handle, const struct ble_gatt_error* error,
+                                       uint16_t chr_val_handle, const struct ble_gatt_dsc* dsc, void* arg);
+    static int OnBatteryCccdWritten(uint16_t conn_handle, const struct ble_gatt_error* error,
+                                    struct ble_gatt_attr* attr, void* arg);
     static int OnCccdWritten(uint16_t conn_handle, const struct ble_gatt_error* error,
                              struct ble_gatt_attr* attr, void* arg);
     static int OnControlPointWritten(uint16_t conn_handle, const struct ble_gatt_error* error,
@@ -142,12 +175,24 @@ private:
     NotificationCallback notification_callback_;
     State state_ = State::kIdle;
     uint16_t conn_handle_ = BLE_HS_CONN_HANDLE_NONE;
+    // Written only by the NimBLE host task, under info_mutex_ so that
+    // GetPeerInfo() can read them from other tasks
+    mutable std::mutex info_mutex_;
     std::string peer_name_;
     std::string peer_address_;
-    // Current Time Service, read once per connection
-    bool time_read_ = false;
+    int battery_level_ = -1;
+    // Current Time and Battery Service, read once per connection (not on the
+    // ANCS discovery retries)
+    bool peer_info_read_ = false;
     std::string current_time_;
     std::string local_time_info_;
+    // Battery Service
+    uint16_t battery_service_start_handle_ = 0;
+    uint16_t battery_service_end_handle_ = 0;
+    uint16_t battery_level_handle_ = 0;
+    uint8_t battery_level_properties_ = 0;
+    uint16_t battery_level_cccd_ = 0;
+    bool battery_dsc_done_ = false;  // Descriptor discovery passed the Battery Level characteristic
 
     // GATT handles
     uint16_t service_start_handle_ = 0;

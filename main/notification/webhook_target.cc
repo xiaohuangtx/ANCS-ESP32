@@ -116,6 +116,8 @@ static bool GetPlaceholder(const std::string& key, const AncsNotification& n, st
         *value = CategoryLabel(n.category_id);
     } else if (key == "device") {
         *value = !n.peer_name.empty() ? n.peer_name : n.peer_address;
+    } else if (key == "battery") {
+        *value = n.peer_battery >= 0 ? std::to_string(n.peer_battery) + "%" : "";
     } else if (key == "date") {
         *value = n.date;
         if (value->size() > 10 && (*value)[10] == 'T') {
@@ -206,6 +208,7 @@ AncsNotification MakeSampleNotification() {
     notification.message = "这是一条来自 ANCS-ESP32 管理后台的测试通知";
     notification.message_size = notification.message.size();
     notification.peer_name = "iPhone";
+    notification.peer_battery = 80;
     time_t now = time(nullptr);
     if (TimeSync::IsClockSet()) {
         struct tm tm;

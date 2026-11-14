@@ -13,6 +13,7 @@
 - Webhook：最多 3 个推送目标，支持原始 JSON、企业微信 / 钉钉 / 飞书群机器人、Bark、ntfy、Server酱、Telegram 和自定义 JSON 模板；独立任务 + 队列，Wi-Fi 断开时排队，失败重试，支持 HTTPS（内置证书包）
 - 过滤规则：按 App、分类、关键词、来源设备决定每条通知推送（到哪些目标）、只记录还是丢弃
 - 时钟：iPhone 连接时从它的 Current Time Service 读取时间和时区，连上 Wi-Fi 后用 SNTP 校准
+- 电量：iPhone 连接时从它的 Battery Service 读取电量并订阅变化，显示在管理后台，并附在每条通知里
 - 管理后台：连上 Wi-Fi 后在 `http://<设备IP>/` 提供网页，可查看通知记录（默认保存最近 30 条）、配置推送目标和过滤规则、上传固件升级（OTA）
 - BOOT 按键：长按进入 Wi-Fi 配网，三击清除 BLE 绑定
 
@@ -168,7 +169,7 @@ Actions  : [] / [清除]
 {{message}}
 ```
 
-可用的占位符：`{{app}}`（App 名称，没有时为 App ID）、`{{app_id}}`、`{{title}}`、`{{subtitle}}`、`{{message}}`、`{{category}}`（如「社交」）、`{{device}}`（来源设备名称）、`{{date}}`、`{{event}}`、`{{uid}}`、`{{positive_action}}`、`{{negative_action}}`。占位符全部为空的行会被省略（例如没有副标题时）。Bark、ntfy、Server酱 把第一行作为标题，其余作为正文。
+可用的占位符：`{{app}}`（App 名称，没有时为 App ID）、`{{app_id}}`、`{{title}}`、`{{subtitle}}`、`{{message}}`、`{{category}}`（如「社交」）、`{{device}}`（来源设备名称）、`{{battery}}`（来源设备收到通知时的电量，如「80%」）、`{{date}}`、`{{event}}`、`{{uid}}`、`{{positive_action}}`、`{{negative_action}}`。占位符全部为空的行会被省略（例如没有副标题时）。Bark、ntfy、Server酱 把第一行作为标题，其余作为正文。
 自定义 JSON 格式的模板就是请求体本身，占位符按 JSON 字符串转义，要写在引号里，例如 `{"text": "{{app}}：{{title}}\n{{message}}"}`；保存时会用示例通知检查生成的是否为合法 JSON。
 
 钉钉、飞书的加签使用当前时间，需要设备时钟已校准（见[时钟](#时钟)）；开机后时钟还没校准时，推送任务最多等待 30 秒。企业微信、钉钉、飞书、Bark、Server酱 出错时也可能返回 HTTP 200，设备会检查响应中的错误码（`errcode` / `code`），出错记为推送失败，不重试。
@@ -191,6 +192,7 @@ Actions  : [] / [清除]
   "device": "aa:bb:cc:dd:ee:ff",
   "peer_name": "张三的iPhone",
   "peer_address": "5c:52:84:aa:bb:cc",
+  "peer_battery": 80,
   "event": "added",
   "uid": 12,
   "category": "Social",
@@ -216,7 +218,7 @@ Actions  : [] / [清除]
 }
 ```
 
-`device` 是 ESP32 的 MAC；`peer_name` / `peer_address` 标识通知来自哪台 iPhone / iPad（地址为绑定后的身份地址，重连不变）。
+`device` 是 ESP32 的 MAC；`peer_name` / `peer_address` 标识通知来自哪台 iPhone / iPad（地址为绑定后的身份地址，重连不变）；`peer_battery` 是收到通知时该设备的电量（0–100），读不到电量时没有这个字段。
 `event` 取值为 `added` / `modified`；管理后台发送的测试通知为 `test`。
 `message` 最多 `CONFIG_ANCS_MAX_MESSAGE_LEN`（默认 512）字节，更长的内容 iOS 不会发送，此时 `message_truncated` 为 `true`、`message_size` 为原始长度。
 

@@ -34,6 +34,7 @@ struct AncsNotification {
     uint16_t conn_handle = 0;
     std::string peer_name;       // GAP device name, e.g. "John's iPhone"
     std::string peer_address;    // Identity address, stable across reconnects
+    int peer_battery = -1;       // Battery level 0-100 when received, -1 if unknown (not stored in flash)
 
     bool has_attributes = false;
     std::string app_id;

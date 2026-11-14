@@ -266,6 +266,16 @@ esp_err_t WebServer::HandleStatus(httpd_req_t* req) {
     cJSON_AddStringToObject(ble_json, "name", BleManager::GetInstance().GetDeviceName().c_str());
     cJSON_AddNumberToObject(ble_json, "connections", BleManager::GetInstance().GetConnectionCount());
     cJSON_AddNumberToObject(ble_json, "max_connections", BleManager::GetInstance().GetMaxConnections());
+    cJSON* peers_json = cJSON_AddArrayToObject(ble_json, "peers");
+    for (auto& peer : BleManager::GetInstance().GetPeers()) {
+        cJSON* peer_json = cJSON_CreateObject();
+        cJSON_AddStringToObject(peer_json, "name", peer.name.c_str());
+        cJSON_AddStringToObject(peer_json, "address", peer.address.c_str());
+        if (peer.battery_level >= 0) {
+            cJSON_AddNumberToObject(peer_json, "battery", peer.battery_level);
+        }
+        cJSON_AddItemToArray(peers_json, peer_json);
+    }
 
     cJSON* heap_json = cJSON_AddObjectToObject(json, "heap");
     cJSON_AddNumberToObject(heap_json, "internal_free", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
