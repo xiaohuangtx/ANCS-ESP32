@@ -1023,8 +1023,18 @@ function setLive(on) {
   $('live').textContent = on ? '实时' : '定时刷新';
   $('live').title = on ? '新通知会立即显示' : '实时连接已断开，正在重连；通知记录页每 5 秒刷新';
 }
-function connectEvents() {
-  const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/api/events');
+function retryEvents() {
+  setTimeout(connectEvents, eventsRetry);
+  eventsRetry = Math.min(eventsRetry * 2, 30000);
+}
+// Browsers do not reliably send the login to a WebSocket and would ask for it
+// again, so the handshake carries a token fetched with the login instead
+async function connectEvents() {
+  let token;
+  try { token = (await api('/api/events/token', { cache:'no-store' })).token; }
+  catch (e) { retryEvents(); return; }
+  const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host +
+    '/api/events?token=' + encodeURIComponent(token));
   let ping = null;
   events = ws;
   ws.onopen = () => {
@@ -1043,8 +1053,7 @@ function connectEvents() {
     clearInterval(ping);
     events = null;
     setLive(false);
-    setTimeout(connectEvents, eventsRetry);
-    eventsRetry = Math.min(eventsRetry * 2, 30000);
+    retryEvents();
   };
 }
 

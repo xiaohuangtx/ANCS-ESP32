@@ -20,6 +20,7 @@
 #include <esp_system.h>
 #include <esp_mac.h>
 #include <esp_heap_caps.h>
+#include <esp_random.h>
 
 #include <algorithm>
 #include <cstring>
@@ -102,6 +103,7 @@ void WebServer::Start() {
         std::lock_guard<std::mutex> lock(mutex_);
         Settings settings("web");
         password_ = settings.GetString("password", CONFIG_WEB_ADMIN_PASSWORD);
+        RenewEventsToken();
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -127,6 +129,7 @@ void WebServer::Start() {
         {"/api/notifications", HTTP_GET, HandleGetNotifications, this},
         {"/api/notifications", HTTP_DELETE, HandleClearNotifications, this},
         {"/api/notifications/action", HTTP_POST, HandleNotificationAction, this},
+        {"/api/events/token", HTTP_GET, HandleGetEventsToken, this},
         {.uri = "/api/events", .method = HTTP_GET, .handler = HandleEvents, .user_ctx = this,
          .is_websocket = true, .ws_pre_handshake_cb = HandleEventsHandshake},
         {"/api/config", HTTP_GET, HandleGetConfig, this},
@@ -183,8 +186,20 @@ bool WebServer::HasPassword() {
 void WebServer::SetPassword(const std::string& password) {
     std::lock_guard<std::mutex> lock(mutex_);
     password_ = password;
+    // Pages that knew the old password must not keep opening /api/events
+    RenewEventsToken();
     Settings settings("web", true);
     settings.SetString("password", password);
+}
+
+void WebServer::RenewEventsToken() {
+    uint8_t bytes[16];
+    esp_fill_random(bytes, sizeof(bytes));
+    char hex[sizeof(bytes) * 2 + 1];
+    for (size_t i = 0; i < sizeof(bytes); i++) {
+        snprintf(hex + i * 2, 3, "%02x", bytes[i]);
+    }
+    events_token_ = hex;
 }
 
 static constexpr size_t kMaxHeaderLength = 255;
@@ -206,7 +221,7 @@ static std::string GetHeader(httpd_req_t* req, const char* name) {
     return value;
 }
 
-bool WebServer::CheckAuth(httpd_req_t* req) {
+bool WebServer::IsAuthorized(httpd_req_t* req) {
     std::string expected;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -215,8 +230,11 @@ bool WebServer::CheckAuth(httpd_req_t* req) {
         }
         expected = "Basic " + Base64Encode("admin:" + password_);
     }
+    return GetHeader(req, "Authorization") == expected;
+}
 
-    if (GetHeader(req, "Authorization") == expected) {
+bool WebServer::CheckAuth(httpd_req_t* req) {
+    if (IsAuthorized(req)) {
         return true;
     }
 
@@ -411,8 +429,41 @@ esp_err_t WebServer::HandleNotificationAction(httpd_req_t* req) {
 
 // Before the WebSocket upgrade. Any site can open a WebSocket to the device
 // (there is no CORS for them), so check that the admin page itself asks.
+// Browsers do not reliably attach the cached Basic credentials to a WebSocket
+// handshake, and answering it with a challenge makes them ask for the password
+// a second time. The page therefore fetches a token (with Basic auth) first and
+// passes it as ?token=.
+esp_err_t WebServer::HandleGetEventsToken(httpd_req_t* req) {
+    auto* self = Self(req);
+    if (!self->CheckAuth(req)) {
+        return ESP_OK;
+    }
+    cJSON* json = cJSON_CreateObject();
+    {
+        std::lock_guard<std::mutex> lock(self->mutex_);
+        cJSON_AddStringToObject(json, "token", self->events_token_.c_str());
+    }
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return SendJson(req, json);
+}
+
+bool WebServer::HasEventsToken(httpd_req_t* req) {
+    char query[64];
+    char token[40];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "token", token, sizeof(token)) != ESP_OK) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    return token == events_token_;
+}
+
 esp_err_t WebServer::HandleEventsHandshake(httpd_req_t* req) {
-    if (!Self(req)->CheckAuth(req)) {
+    auto* self = Self(req);
+    if (!self->IsAuthorized(req) && !self->HasEventsToken(req)) {
+        // No WWW-Authenticate, which would bring up the login dialog again
+        httpd_resp_set_status(req, "401 Unauthorized");
+        httpd_resp_sendstr(req, "Unauthorized");
         return ESP_FAIL;
     }
     std::string origin = GetHeader(req, "Origin");

@@ -24,6 +24,8 @@
  *
  * The page keeps a WebSocket open on /api/events. It only carries change
  * signals ({"type": "notifications"}), the page then fetches the data itself.
+ * The handshake is authorized by a token from /api/events/token instead of
+ * Basic auth, which browsers do not reliably send on WebSockets.
  *
  * The provisioning hotspot runs its own server (ConfigPortal) on the same
  * port, so this one must be stopped before entering Wi-Fi config mode.
@@ -52,8 +54,14 @@ public:
 private:
     WebServer() = default;
 
+    // Whether the request has the right Basic credentials (or no password is set)
+    bool IsAuthorized(httpd_req_t* req);
     // Sends the 401 response and returns false if the password is wrong
     bool CheckAuth(httpd_req_t* req);
+    // Whether the query has ?token= matching events_token_
+    bool HasEventsToken(httpd_req_t* req);
+    // Caller holds mutex_
+    void RenewEventsToken();
     void SetPassword(const std::string& password);
     bool HasPassword();
     bool ReceiveFirmware(httpd_req_t* req, std::string& error);
@@ -64,6 +72,7 @@ private:
     static esp_err_t HandleGetNotifications(httpd_req_t* req);
     static esp_err_t HandleClearNotifications(httpd_req_t* req);
     static esp_err_t HandleNotificationAction(httpd_req_t* req);
+    static esp_err_t HandleGetEventsToken(httpd_req_t* req);
     static esp_err_t HandleEventsHandshake(httpd_req_t* req);
     static esp_err_t HandleEvents(httpd_req_t* req);
     static void SendNotificationsChanged(void* arg);
@@ -87,8 +96,11 @@ private:
     std::mutex server_mutex_;   // Guards server_ (Start / Stop)
     httpd_handle_t server_ = nullptr;
 
-    std::mutex mutex_;          // Guards password_ (used by handlers)
+    std::mutex mutex_;          // Guards password_ and events_token_ (used by handlers)
     std::string password_;
+    // Lets the page open /api/events without Basic auth, see HandleGetEventsToken.
+    // Random, renewed on every start and password change.
+    std::string events_token_;
 
     // Separate from server_mutex_: Stop() holds that one while waiting for the
     // server task, which may be in a handler that ends up notifying
