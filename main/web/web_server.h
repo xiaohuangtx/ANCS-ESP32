@@ -2,6 +2,10 @@
 #define WEB_SERVER_H
 
 #include <esp_http_server.h>
+#include <esp_timer.h>
+
+#include <cstddef>
+#include <cstdint>
 
 #include <string>
 #include <mutex>
@@ -23,7 +27,12 @@
  * through the browser of anyone on the LAN.
  *
  * The page keeps a WebSocket open on /api/events. It only carries change
- * signals ({"type": "notifications"}), the page then fetches the data itself.
+ * signals, the page then fetches the data itself over HTTP:
+ *   {"type": "notifications"}  the notification list changed
+ *   {"type": "status"}         something in /api/status changed, other than
+ *                              what changes with time (uptime, clock, heap, RSSI)
+ *   {"type": "logs"}           new output for /api/logs
+ * Without the WebSocket the page polls the same endpoints instead.
  * The handshake is authorized by a token from /api/events/token instead of
  * Basic auth, which browsers do not reliably send on WebSockets.
  *
@@ -76,6 +85,10 @@ private:
     static esp_err_t HandleEventsHandshake(httpd_req_t* req);
     static esp_err_t HandleEvents(httpd_req_t* req);
     static void SendNotificationsChanged(void* arg);
+    // Every second: queues CheckForChanges, which compares status and log
+    // position with the last check and signals what differs
+    static void OnCheckTimer(void* arg);
+    static void CheckForChanges(void* arg);
     static esp_err_t HandleGetConfig(httpd_req_t* req);
     static esp_err_t HandleSetConfig(httpd_req_t* req);
     static esp_err_t HandleGetWebhooks(httpd_req_t* req);
@@ -107,6 +120,14 @@ private:
     std::mutex events_mutex_;   // Guards events_server_
     httpd_handle_t events_server_ = nullptr;
     std::atomic<bool> notifications_changed_queued_ = false;
+    std::atomic<bool> check_queued_ = false;
+    esp_timer_handle_t check_timer_ = nullptr;
+
+    // Only used in the server task, by CheckForChanges. Not valid while no
+    // page is connected: a page fetches everything itself when it connects.
+    bool checked_ = false;
+    size_t last_status_ = 0;
+    uint64_t last_log_position_ = 0;
 };
 
 #endif // WEB_SERVER_H

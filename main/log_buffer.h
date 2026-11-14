@@ -38,6 +38,8 @@ public:
     // Output written since position "since" (bytes written since boot). When
     // that part is gone or "since" is from another boot, everything kept.
     ReadResult Read(uint64_t since);
+    // Bytes written since boot: changes whenever there is new output
+    uint64_t GetPosition();
     // Random per boot: positions from another boot mean nothing
     uint32_t GetBootId() const { return boot_id_; }
 

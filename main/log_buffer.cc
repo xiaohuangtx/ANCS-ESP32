@@ -93,6 +93,13 @@ void LogBuffer::Append(const char* data, size_t length) {
     taskEXIT_CRITICAL(&lock_);
 }
 
+uint64_t LogBuffer::GetPosition() {
+    taskENTER_CRITICAL(&lock_);
+    uint64_t total = total_;
+    taskEXIT_CRITICAL(&lock_);
+    return total;
+}
+
 LogBuffer::ReadResult LogBuffer::Read(uint64_t since) {
     ReadResult result = {{}, since, false};
     if (buffer_ == nullptr) {

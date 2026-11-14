@@ -49,6 +49,8 @@ static const char* ResetReasonName(esp_reset_reason_t reason) {
 // Leave sockets for the webhook client (CONFIG_LWIP_MAX_SOCKETS is 10). Every
 // open admin page keeps one for /api/events.
 static constexpr int kMaxOpenSockets = 5;
+// How often CheckForChanges runs, i.e. how late a status or log signal can be
+static constexpr int kCheckIntervalMs = 1000;
 static constexpr size_t kOtaBufferSize = 4096;
 // Image header + first segment header + app descriptor, enough to identify the image
 static constexpr size_t kMinImageSize =
@@ -157,6 +159,20 @@ void WebServer::Start() {
         events_server_ = server_;
         // A signal still queued when the server stopped was dropped with it
         notifications_changed_queued_ = false;
+        check_queued_ = false;
+    }
+    checked_ = false;  // The server task is not running yet
+    if (check_timer_ == nullptr) {
+        esp_timer_create_args_t args = {};
+        args.callback = OnCheckTimer;
+        args.dispatch_method = ESP_TIMER_TASK;
+        args.name = "web_check";
+        if (esp_timer_create(&args, &check_timer_) != ESP_OK) {
+            check_timer_ = nullptr;
+        }
+    }
+    if (check_timer_ != nullptr) {
+        esp_timer_start_periodic(check_timer_, kCheckIntervalMs * 1000ULL);
     }
 
     ESP_LOGI(TAG, "Admin page: http://%s/%s", WifiService::GetInstance().GetIpAddress().c_str(),
@@ -168,6 +184,9 @@ void WebServer::Stop() {
     std::lock_guard<std::mutex> lock(server_mutex_);
     if (server_ == nullptr) {
         return;
+    }
+    if (check_timer_ != nullptr) {
+        esp_timer_stop(check_timer_);
     }
     {
         std::lock_guard<std::mutex> lock(events_mutex_);
@@ -505,31 +524,139 @@ void WebServer::NotifyNotificationsChanged() {
     }
 }
 
+// Sockets of the open admin pages. Runs in the server task.
+static size_t GetEventClients(httpd_handle_t server, int (&clients)[kMaxOpenSockets]) {
+    int fds[kMaxOpenSockets];
+    size_t count = kMaxOpenSockets;
+    if (httpd_get_client_list(server, &count, fds) != ESP_OK) {
+        return 0;
+    }
+    size_t found = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (httpd_ws_get_fd_info(server, fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
+            clients[found++] = fds[i];
+        }
+    }
+    return found;
+}
+
+// Runs in the server task
+static void Broadcast(httpd_handle_t server, const int* clients, size_t count, const char* message) {
+    httpd_ws_frame_t frame = {};
+    frame.final = true;
+    frame.type = HTTPD_WS_TYPE_TEXT;
+    frame.payload = (uint8_t*)message;
+    frame.len = strlen(message);
+    for (size_t i = 0; i < count; i++) {
+        if (httpd_ws_send_frame_async(server, clients[i], &frame) != ESP_OK) {
+            // The page reconnects
+            httpd_sess_trigger_close(server, clients[i]);
+        }
+    }
+}
+
 // Runs in the server task
 void WebServer::SendNotificationsChanged(void* arg) {
     auto server = static_cast<httpd_handle_t>(arg);
     // Cleared first, so a change from now on queues another signal
     GetInstance().notifications_changed_queued_ = false;
 
-    static const char kMessage[] = "{\"type\":\"notifications\"}";
-    httpd_ws_frame_t frame = {};
-    frame.final = true;
-    frame.type = HTTPD_WS_TYPE_TEXT;
-    frame.payload = (uint8_t*)kMessage;
-    frame.len = sizeof(kMessage) - 1;
+    int clients[kMaxOpenSockets];
+    size_t count = GetEventClients(server, clients);
+    Broadcast(server, clients, count, "{\"type\":\"notifications\"}");
+}
 
-    int fds[kMaxOpenSockets];
-    size_t count = kMaxOpenSockets;
-    if (httpd_get_client_list(server, &count, fds) != ESP_OK) {
-        return;
+// The parts of /api/status (HandleStatus) that change by events. Uptime, clock,
+// heap and RSSI change all the time; the page refreshes them itself.
+static size_t StatusFingerprint() {
+    auto& wifi = WifiService::GetInstance();
+    auto& ble = BleManager::GetInstance();
+    std::string key = wifi.GetSsid();
+    key += '\0';
+    key += wifi.GetIpAddress();
+    key += '\0';
+    key += ble.GetDeviceName();
+    for (int value : {(int)ble.GetConnectionCount(), (int)ble.GetMaxConnections()}) {
+        key += '\0';
+        key += std::to_string(value);
     }
-    for (size_t i = 0; i < count; i++) {
-        if (httpd_ws_get_fd_info(server, fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET &&
-            httpd_ws_send_frame_async(server, fds[i], &frame) != ESP_OK) {
-            // The page reconnects
-            httpd_sess_trigger_close(server, fds[i]);
+    for (auto& peer : ble.GetPeers()) {
+        for (auto* field : {&peer.name, &peer.address}) {
+            key += '\0';
+            key += *field;
+        }
+        key += '\0';
+        key += std::to_string(peer.battery_level);
+    }
+
+    auto& history = NotificationHistory::GetInstance();
+    auto time_status = TimeSync::GetInstance().GetStatus();
+    auto diag = Application::GetInstance().GetDiagnostics();
+    // Busy: only whether, and whether long enough to count as stuck, so a long
+    // task does not send a signal every second
+    int busy = diag.busy_seconds == 0 ? 0 : diag.busy_seconds < 5 ? 1 : 2;
+    double values[] = {
+        (double)history.GetCount(), (double)history.GetCapacity(),
+        (double)WebhookClient::GetInstance().ResolveTargets(0),
+        (double)TimeSync::IsClockSet(), (double)time_status.source, (double)time_status.last_sync,
+        (double)time_status.utc_offset, (double)time_status.offset_from_iphone,
+        (double)diag.notifications_received, (double)diag.notifications_handled,
+        (double)diag.notifications_skipped, (double)diag.notifications_dropped,
+        (double)diag.pending_tasks, (double)busy,
+    };
+    for (double value : values) {
+        key += '\0';
+        key += std::to_string(value);
+    }
+    auto& store = NotificationStore::GetInstance();
+    if (store.IsEnabled()) {
+        auto stats = store.GetStats();
+        for (double value : {(double)stats.used_sectors, (double)stats.errors, (double)stats.last_error}) {
+            key += '\0';
+            key += std::to_string(value);
         }
     }
+    return std::hash<std::string>{}(key);
+}
+
+// On the esp_timer task
+void WebServer::OnCheckTimer(void*) {
+    auto& self = GetInstance();
+    std::lock_guard<std::mutex> lock(self.events_mutex_);
+    if (self.events_server_ == nullptr || self.check_queued_.exchange(true)) {
+        return;
+    }
+    if (httpd_queue_work(self.events_server_, CheckForChanges, self.events_server_) != ESP_OK) {
+        self.check_queued_ = false;
+    }
+}
+
+// Runs in the server task. Must not log: that would be new log output, sent
+// as a signal on the next check.
+void WebServer::CheckForChanges(void* arg) {
+    auto server = static_cast<httpd_handle_t>(arg);
+    auto& self = GetInstance();
+    self.check_queued_ = false;
+
+    int clients[kMaxOpenSockets];
+    size_t count = GetEventClients(server, clients);
+    if (count == 0) {
+        self.checked_ = false;
+        return;
+    }
+    size_t status = StatusFingerprint();
+    uint64_t log_position = LogBuffer::GetInstance().GetPosition();
+    if (self.checked_) {
+        if (status != self.last_status_) {
+            Broadcast(server, clients, count, "{\"type\":\"status\"}");
+        }
+        if (log_position != self.last_log_position_) {
+            Broadcast(server, clients, count, "{\"type\":\"logs\"}");
+        }
+    }
+    self.checked_ = true;
+    self.last_status_ = status;
+    self.last_log_position_ = log_position;
 }
 
 esp_err_t WebServer::HandleGetConfig(httpd_req_t* req) {

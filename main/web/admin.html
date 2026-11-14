@@ -253,7 +253,7 @@ header .live.on::before { background:var(--ok); }
 const $ = id => document.getElementById(id);
 const CATEGORY = { Other:'其他', IncomingCall:'来电', MissedCall:'未接来电', Voicemail:'语音留言', Social:'社交', Schedule:'日程',
   Email:'邮件', News:'新闻', HealthAndFitness:'健康', BusinessAndFinance:'财务', Location:'位置', Entertainment:'娱乐' };
-let status = null, timer = null, diagTimer = null, configLoaded = Promise.resolve();
+let status = null, timer = null, currentTab = null, configLoaded = Promise.resolve();
 
 async function api(path, opts = {}) {
   const r = await fetch(path, opts);
@@ -264,6 +264,24 @@ async function api(path, opts = {}) {
 }
 function postJson(path, body) {
   return api(path, { method:'POST', headers:{'Content-Type':'application/json'}, body: body ? JSON.stringify(body) : '' });
+}
+// For loads triggered by device signals, which come in bursts (e.g. iOS
+// replaying Notification Center after reconnecting): one request at a time,
+// plus one more for whatever came meanwhile. load.started is when the last
+// request went out, for the polling in switchTab.
+function single(fn) {
+  let running = false, again = false;
+  const load = async () => {
+    if (running) { again = true; return; }
+    running = true;
+    load.started = Date.now();
+    try { await fn(); } finally {
+      running = false;
+      if (again) { again = false; load(); }
+    }
+  };
+  load.started = 0;
+  return load;
 }
 function show(id, text, ok) { const e = $(id); e.textContent = text; e.className = 'msg ' + (ok ? 'ok' : 'err'); }
 function kv(items) {
@@ -297,22 +315,37 @@ function timeSource(t) {
 }
 function rssi(v) { return v ? v + ' dBm' + (v > -60 ? '（强）' : v > -75 ? '（中）' : '（弱）') : '-'; }
 
+// What each tab shows: [load, device signal that it changed, polling interval
+// in ms without the WebSocket]. While the WebSocket is open the signals
+// trigger the loads, and polling every LIVE_POLL_MS only keeps what changes
+// with time current (uptime, "x 分钟前", memory, Wi-Fi signal).
+const LIVE_POLL_MS = 30000;
+function tabLoads(name) {
+  return { overview: [[loadStatus, 'status', 10000]], ota: [[loadStatus, 'status', 10000]],
+           notifications: [[loadNotifications, 'notifications', 5000]],
+           system: [[loadLogs, 'logs', 3000], [loadDiag, 'status', 10000]] }[name] || [];
+}
 function switchTab(name) {
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.tab === name));
   document.querySelectorAll('section').forEach(s => s.classList.toggle('active', s.id === name));
-  clearInterval(timer); clearInterval(diagTimer);
-  const refresh = { overview: loadStatus, notifications: loadNotifications, ota: loadStatus, system: loadLogs }[name];
-  if (name === 'system') { followLog = true; loadDiag(); diagTimer = setInterval(loadDiag, 10000); }
+  clearInterval(timer);
+  currentTab = name;
+  if (name === 'system') followLog = true;
   if (name === 'settings') configLoaded = loadConfig();
   if (name === 'wifi') loadWifi();
-  if (refresh) {
-    refresh();
-    timer = setInterval(name === 'notifications' ? pollNotifications : refresh, { notifications: 5000, system: 3000 }[name] || 10000);
+  const loads = tabLoads(name);
+  loads.forEach(([load]) => load());
+  if (loads.length) {
+    timer = setInterval(() => {
+      for (const [load, , ms] of loads) {
+        if (Date.now() - load.started >= (eventsOpen() ? LIVE_POLL_MS : ms)) load();
+      }
+    }, 1000);
   }
 }
 document.querySelectorAll('nav a').forEach(a => a.onclick = () => switchTab(a.dataset.tab));
 
-async function loadStatus() {
+const loadStatus = single(async () => {
   try { status = await api('/api/status'); } catch (e) { return; }
   const s = status;
   $('hdrver').textContent = 'v' + s.version;
@@ -329,7 +362,7 @@ async function loadStatus() {
   $('mem').innerHTML = kv(mem);
   $('otainfo').innerHTML = kv([['当前版本', s.version], ['当前分区', s.ota.running], ['写入分区', s.ota.next || '无'],
     ['最大固件大小', kb(s.ota.max_size)]]);
-}
+});
 
 const RESET = { power_on:'上电', software:'软件重启', panic:'崩溃', interrupt_watchdog:'中断看门狗', task_watchdog:'任务看门狗',
   watchdog:'看门狗', brownout:'电压过低', deep_sleep:'深度睡眠唤醒', external:'外部复位', other:'其他' };
@@ -337,7 +370,7 @@ function usedPercent(used, total) {
   const p = used * 100 / total;
   return used && p < 1 ? '<1%' : Math.round(p) + '%';
 }
-async function loadDiag() {
+const loadDiag = single(async () => {
   let s;
   try { s = await api('/api/status'); } catch (e) { return; }
   const d = s.diag;
@@ -362,8 +395,8 @@ async function loadDiag() {
       ['主任务', d.busy_seconds ? `忙碌 ${d.busy_seconds} 秒` : '空闲', stuck ? 'bad' : 'good'],
       ['等待处理', d.pending_tasks, d.pending_tasks > 0 && stuck ? 'bad' : '']]) +
     group('Flash 存储', store);
-}
-let logText = '', logLoading = false;
+});
+let logText = '';
 // Position in the device log, so each refresh only fetches what is new
 let logBoot = '', logNext = 0;
 const LOG_KEEP = 65536;  // Characters kept on the page
@@ -373,9 +406,7 @@ $('logs').onscroll = () => {
   const el = $('logs');
   followLog = el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
 };
-async function loadLogs() {
-  if (logLoading) return;  // A slow response is still on its way
-  logLoading = true;
+const loadLogs = single(async () => {
   let text, reset;
   try {
     const r = await fetch(`/api/logs?boot=${logBoot}&since=${logNext}`, { cache:'no-store' });
@@ -388,8 +419,6 @@ async function loadLogs() {
   } catch (e) {
     if (!logText) $('logs').textContent = '读取日志失败：' + e.message;
     return;
-  } finally {
-    logLoading = false;
   }
   if (!reset && !text && logText) return;  // Nothing new: keep the page (and any selection) as it is
   logText = reset ? text : logText + text;
@@ -404,7 +433,7 @@ async function loadLogs() {
     return m ? `<span class="${m[1]}">${esc(line)}</span>` : esc(line);
   }).join('\n') : '（暂无日志）';
   if (followLog) el.scrollTop = el.scrollHeight;
-}
+});
 $('drefresh').onclick = loadDiag;
 $('lrefresh').onclick = loadLogs;
 $('ldownload').onclick = () => {
@@ -414,29 +443,14 @@ $('ldownload').onclick = () => {
   a.click(); URL.revokeObjectURL(a.href);
 };
 
-// Changes come in bursts (e.g. iOS replaying Notification Center after
-// reconnecting): one request at a time, plus one more for what came meanwhile
-let notifLoading = false, notifReload = false, notifLoaded = 0;
-async function loadNotifications() {
-  if (notifLoading) { notifReload = true; return; }
-  notifLoading = true;
-  try {
-    let data;
-    try { data = await api('/api/notifications'); } catch (e) { $('nlist').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
-    notifLoaded = Date.now();
-    notifications = data.items; maxMessageLen = data.max_message_len;
-    renderNotifications(data);
-    updateToasts();
-    updateOpenNotification();
-  } finally {
-    notifLoading = false;
-    if (notifReload) { notifReload = false; loadNotifications(); }
-  }
-}
-// While the device pushes changes, polling only keeps "x 分钟前" up to date
-function pollNotifications() {
-  if (!eventsOpen() || Date.now() - notifLoaded >= 30000) loadNotifications();
-}
+const loadNotifications = single(async () => {
+  let data;
+  try { data = await api('/api/notifications'); } catch (e) { $('nlist').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  notifications = data.items; maxMessageLen = data.max_message_len;
+  renderNotifications(data);
+  updateToasts();
+  updateOpenNotification();
+});
 function renderNotifications(data) {
   $('ncount').textContent = data.items.length + ' / ' + data.capacity;
   if (!data.items.length) { $('nlist').innerHTML = '<div class="empty">暂无通知</div>'; return; }
@@ -1014,14 +1028,21 @@ $('wificfg').onclick = async () => {
 };
 
 // Live updates: the device only signals that something changed, the page
-// fetches the data itself. Without the WebSocket (e.g. blocked by a proxy) the
-// notification tab falls back to polling.
+// fetches the data itself. Without the WebSocket (e.g. blocked by a proxy, or
+// not connected yet) the tabs fall back to polling, see switchTab.
 let events = null, eventsRetry = 1000;
 function eventsOpen() { return events !== null && events.readyState === WebSocket.OPEN; }
 function setLive(on) {
   $('live').className = 'live' + (on ? ' on' : '');
   $('live').textContent = on ? '实时' : '定时刷新';
-  $('live').title = on ? '新通知会立即显示' : '实时连接已断开，正在重连；通知记录页每 5 秒刷新';
+  $('live').title = on ? '状态、日志和新通知会立即显示' : '实时连接已断开，正在重连；当前页面每隔几秒刷新';
+}
+// After the signal of that type, or everything when type is null. The
+// notifications also for the toasts, on any tab.
+function reloadChanged(type) {
+  const loads = new Set(tabLoads(currentTab).filter(([, t]) => type === null || t === type).map(([load]) => load));
+  if (type === null || type === 'notifications') loads.add(loadNotifications);
+  loads.forEach(load => load());
 }
 function retryEvents() {
   setTimeout(connectEvents, eventsRetry);
@@ -1042,12 +1063,12 @@ async function connectEvents() {
     setLive(true);
     // Keeps the device from closing the socket as idle when it runs out of sockets
     ping = setInterval(() => ws.send('ping'), 20000);
-    loadNotifications();  // Whatever changed while disconnected
+    reloadChanged(null);  // Whatever changed while disconnected
   };
   ws.onmessage = e => {
     let m = {};
     try { m = JSON.parse(e.data); } catch (err) {}
-    if (m.type === 'notifications') loadNotifications();
+    if (m.type) reloadChanged(m.type);
   };
   ws.onclose = () => {
     clearInterval(ping);
