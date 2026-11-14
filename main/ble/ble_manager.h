@@ -6,6 +6,7 @@
 
 #include <string>
 #include <array>
+#include <vector>
 #include <atomic>
 #include <functional>
 
@@ -42,6 +43,8 @@ public:
     // Advertised name, e.g. "ANCS-A1B2C3". Set by Initialize(), read-only afterwards.
     const std::string& GetDeviceName() const { return device_name_; }
     int GetConnectionCount() const;
+    // Thread-safe: the connected devices
+    std::vector<AncsClient::PeerInfo> GetPeers() const;
     int GetMaxConnections() const { return max_connections_; }
     // Thread-safe, clamped to [1, kMaxConnections], persisted to NVS. Lowering
     // the limit does not drop connected devices, it only stops advertising.

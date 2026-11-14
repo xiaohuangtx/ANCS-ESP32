@@ -322,7 +322,8 @@ async function loadStatus() {
     ['设备时间', deviceTime(s.time)], ['时间来源', timeSource(s.time)]]);
   $('net').innerHTML = kv([['蓝牙名称', s.ble.name || '-'], ['Wi-Fi', s.wifi.ssid || '-'], ['IP 地址', s.wifi.ip || '-'], ['信号', rssi(s.wifi.rssi)],
     ['蓝牙连接', s.ble.connections + ' / ' + s.ble.max_connections], ['推送目标', s.webhook_targets ? s.webhook_targets + ' 个已启用' : '未配置'],
-    ['通知记录', s.notification_count + ' / ' + s.history_size]]);
+    ['通知记录', s.notification_count + ' / ' + s.history_size],
+    ...(s.ble.peers || []).map(p => [esc(p.name || p.address || '连接中'), p.battery != null ? '电量 ' + p.battery + '%' : '电量未知'])]);
   const mem = [['内部 RAM 可用', kb(s.heap.internal_free) + ' / ' + kb(s.heap.internal_total)], ['内部 RAM 最低', kb(s.heap.internal_min)]];
   if (s.heap.psram_total) mem.push(['PSRAM 可用', kb(s.heap.psram_free) + ' / ' + kb(s.heap.psram_total)]);
   $('mem').innerHTML = kv(mem);
@@ -632,7 +633,7 @@ const FORMATS = {
   custom: { label:'自定义 JSON', url:'https://example.com/hook', secret:'Authorization 请求头（可选）', secretPh:'Bearer xxxxxx', tmpl:'请求体模板（JSON）',
     tmplPh:'{"text": "{{app}}：{{title}}\\n{{message}}"}', hint:'按模板生成 JSON 请求体 POST 到该地址。' },
 };
-const PLACEHOLDERS = '可用占位符：{{app}} {{app_id}} {{title}} {{subtitle}} {{message}} {{category}} {{device}} {{date}} {{event}} {{uid}} {{positive_action}} {{negative_action}}。';
+const PLACEHOLDERS = '可用占位符：{{app}} {{app_id}} {{title}} {{subtitle}} {{message}} {{category}} {{device}} {{battery}} {{date}} {{event}} {{uid}} {{positive_action}} {{negative_action}}。';
 $('tformat').innerHTML = Object.entries(FORMATS).map(([k, f]) => `<option value="${k}">${f.label}</option>`).join('');
 
 let targets = [], targetsMax = 3, defaultTemplate = '', targetEditing = -1;

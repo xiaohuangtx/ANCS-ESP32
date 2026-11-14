@@ -28,6 +28,11 @@ static const ble_uuid16_t kDeviceNameUuid = BLE_UUID16_INIT(BLE_SVC_GAP_CHR_UUID
 // Current Time Service (0x1805), offered by iOS to bonded devices
 static const ble_uuid16_t kCurrentTimeUuid = BLE_UUID16_INIT(0x2A2B);
 static const ble_uuid16_t kLocalTimeInfoUuid = BLE_UUID16_INIT(0x2A0F);
+// Battery Service (0x180F) / Battery Level (0x2A19, uint8 percent, readable and
+// notifiable), offered by iOS to bonded devices
+static const ble_uuid16_t kBatteryServiceUuid = BLE_UUID16_INIT(0x180F);
+static const ble_uuid16_t kBatteryLevelUuid = BLE_UUID16_INIT(0x2A19);
+static const ble_uuid16_t kCharacteristicDeclarationUuid = BLE_UUID16_INIT(0x2803);
 
 // Attributes requested for every notification, in this order
 struct RequestedAttribute {
@@ -80,6 +85,11 @@ const ble_uuid128_t& AncsClient::ServiceUuid() {
     return kAncsServiceUuid;
 }
 
+AncsClient::PeerInfo AncsClient::GetPeerInfo() const {
+    std::lock_guard<std::mutex> lock(info_mutex_);
+    return PeerInfo{peer_name_, peer_address_, battery_level_};
+}
+
 void AncsClient::Initialize() {
     ble_npl_callout_init(&retry_timer_, nimble_port_get_dflt_eventq(), OnRetryTimer, this);
     ble_npl_callout_init(&request_timer_, nimble_port_get_dflt_eventq(), OnRequestTimeout, this);
@@ -103,6 +113,7 @@ void AncsClient::OnEncrypted(uint16_t conn_handle) {
         const uint8_t* a = desc.peer_id_addr.val;
         char addr[18];
         snprintf(addr, sizeof(addr), "%02x:%02x:%02x:%02x:%02x:%02x", a[5], a[4], a[3], a[2], a[1], a[0]);
+        std::lock_guard<std::mutex> lock(info_mutex_);
         peer_address_ = addr;
     }
     StartDiscovery();
@@ -135,11 +146,21 @@ void AncsClient::ResetConnectionState() {
     current_request_.reset();
     control_point_write_pending_ = false;
     data_buffer_.clear();
-    peer_name_.clear();
-    peer_address_.clear();
-    time_read_ = false;
+    {
+        std::lock_guard<std::mutex> lock(info_mutex_);
+        peer_name_.clear();
+        peer_address_.clear();
+        battery_level_ = -1;
+    }
+    peer_info_read_ = false;
     current_time_.clear();
     local_time_info_.clear();
+    battery_service_start_handle_ = 0;
+    battery_service_end_handle_ = 0;
+    battery_level_handle_ = 0;
+    battery_level_properties_ = 0;
+    battery_level_cccd_ = 0;
+    battery_dsc_done_ = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +201,7 @@ int AncsClient::HandlePeerNameRead(const struct ble_gatt_error* error, struct bl
         char name[64];
         uint16_t len = std::min<uint16_t>(OS_MBUF_PKTLEN(attr->om), sizeof(name));
         os_mbuf_copydata(attr->om, 0, len, name);
+        std::lock_guard<std::mutex> lock(info_mutex_);
         peer_name_.assign(name, len);
         return 0;
     }
@@ -191,14 +213,15 @@ int AncsClient::HandlePeerNameRead(const struct ble_gatt_error* error, struct bl
     return 0;
 }
 
-// Next step after the peer name: the current time once per connection (not on
-// the retries while "Share System Notifications" is off), then ANCS
+// Next step after the peer name: the current time and battery level once per
+// connection (not on the retries while "Share System Notifications" is off),
+// then ANCS
 void AncsClient::OnPeerInfoRead() {
-    if (time_read_) {
+    if (peer_info_read_) {
         DiscoverService();
         return;
     }
-    time_read_ = true;
+    peer_info_read_ = true;
     ReadTime(State::kReadingCurrentTime);
 }
 
@@ -208,7 +231,7 @@ void AncsClient::ReadTime(State state) {
     int rc = ble_gattc_read_by_uuid(conn_handle_, 1, 0xffff, uuid, OnTimeRead, this);
     if (rc != 0) {
         ESP_LOGW(TAG, "Failed to read current time, rc=%d", rc);
-        DiscoverService();
+        DiscoverBatteryService();
     }
 }
 
@@ -233,8 +256,152 @@ int AncsClient::HandleTimeRead(const struct ble_gatt_error* error, struct ble_ga
     if (!current_time_.empty()) {
         TimeSync::GetInstance().OnIphoneTime(current_time_, local_time_info_, peer_name_);
     }
-    DiscoverService();
+    DiscoverBatteryService();
     return 0;
+}
+
+// Battery Service: read the level, then subscribe to its updates. Optional, any
+// failure just moves on to ANCS.
+void AncsClient::DiscoverBatteryService() {
+    state_ = State::kDiscoveringBatteryService;
+    int rc = ble_gattc_disc_svc_by_uuid(conn_handle_, &kBatteryServiceUuid.u, OnBatteryServiceDiscovered, this);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "Failed to start Battery Service discovery, rc=%d", rc);
+        OnBatteryDone();
+    }
+}
+
+int AncsClient::HandleBatteryServiceDiscovered(const struct ble_gatt_error* error, const struct ble_gatt_svc* service) {
+    if (error->status == 0 && service != nullptr) {
+        if (battery_service_start_handle_ == 0) {
+            battery_service_start_handle_ = service->start_handle;
+            battery_service_end_handle_ = service->end_handle;
+        }
+        return 0;
+    }
+    if (error->status != BLE_HS_EDONE || battery_service_start_handle_ == 0) {
+        ESP_LOGI(TAG, "conn=%d Battery Service not available, status=%d", conn_handle_, error->status);
+        OnBatteryDone();
+        return 0;
+    }
+
+    state_ = State::kDiscoveringBatteryLevel;
+    int rc = ble_gattc_disc_chrs_by_uuid(conn_handle_, battery_service_start_handle_, battery_service_end_handle_,
+                                         &kBatteryLevelUuid.u, OnBatteryLevelDiscovered, this);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "Failed to start Battery Level discovery, rc=%d", rc);
+        OnBatteryDone();
+    }
+    return 0;
+}
+
+int AncsClient::HandleBatteryLevelDiscovered(const struct ble_gatt_error* error, const struct ble_gatt_chr* chr) {
+    if (error->status == 0 && chr != nullptr) {
+        if (battery_level_handle_ == 0) {
+            battery_level_handle_ = chr->val_handle;
+            battery_level_properties_ = chr->properties;
+        }
+        return 0;
+    }
+    if (error->status != BLE_HS_EDONE || battery_level_handle_ == 0) {
+        ESP_LOGI(TAG, "conn=%d Battery Level not available, status=%d", conn_handle_, error->status);
+        battery_level_handle_ = 0;
+        OnBatteryDone();
+        return 0;
+    }
+
+    state_ = State::kReadingBatteryLevel;
+    int rc = ble_gattc_read(conn_handle_, battery_level_handle_, OnBatteryLevelRead, this);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "Failed to read Battery Level, rc=%d", rc);
+        OnBatteryDone();
+    }
+    return 0;
+}
+
+int AncsClient::HandleBatteryLevelRead(const struct ble_gatt_error* error, struct ble_gatt_attr* attr) {
+    if (error->status == 0 && attr != nullptr) {
+        uint8_t value[1];
+        uint16_t len = std::min<uint16_t>(OS_MBUF_PKTLEN(attr->om), sizeof(value));
+        os_mbuf_copydata(attr->om, 0, len, value);
+        SetBatteryLevel(value, len);
+    } else {
+        ESP_LOGW(TAG, "conn=%d Failed to read Battery Level, status=%d", conn_handle_, error->status);
+    }
+
+    if (!(battery_level_properties_ & BLE_GATT_CHR_PROP_NOTIFY)) {
+        OnBatteryDone();
+        return 0;
+    }
+    // The CCCD follows the value; the range up to the service end may also
+    // hold other characteristics, which HandleBatteryCccdDiscovered() skips
+    state_ = State::kDiscoveringBatteryCccd;
+    battery_dsc_done_ = false;
+    int rc = ble_gattc_disc_all_dscs(conn_handle_, battery_level_handle_, battery_service_end_handle_,
+                                     OnBatteryCccdDiscovered, this);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "Failed to start Battery Level descriptor discovery, rc=%d", rc);
+        OnBatteryDone();
+    }
+    return 0;
+}
+
+int AncsClient::HandleBatteryCccdDiscovered(const struct ble_gatt_error* error, const struct ble_gatt_dsc* dsc) {
+    if (error->status == 0 && dsc != nullptr) {
+        if (battery_dsc_done_) {
+            return 0;
+        }
+        if (ble_uuid_cmp(&dsc->uuid.u, &kCharacteristicDeclarationUuid.u) == 0) {
+            battery_dsc_done_ = true;  // Next characteristic reached
+        } else if (ble_uuid_cmp(&dsc->uuid.u, &kCccdUuid.u) == 0) {
+            battery_level_cccd_ = dsc->handle;
+            battery_dsc_done_ = true;
+        }
+        return 0;
+    }
+    if (error->status != BLE_HS_EDONE || battery_level_cccd_ == 0) {
+        ESP_LOGW(TAG, "conn=%d Battery Level CCCD not found, status=%d", conn_handle_, error->status);
+        OnBatteryDone();
+        return 0;
+    }
+
+    state_ = State::kSubscribingBatteryLevel;
+    static const uint8_t kEnableNotify[2] = {0x01, 0x00};
+    int rc = ble_gattc_write_flat(conn_handle_, battery_level_cccd_, kEnableNotify, sizeof(kEnableNotify),
+                                  OnBatteryCccdWritten, this);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "Failed to subscribe Battery Level, rc=%d", rc);
+        OnBatteryDone();
+    }
+    return 0;
+}
+
+int AncsClient::HandleBatteryCccdWritten(const struct ble_gatt_error* error) {
+    if (error->status != 0) {
+        ESP_LOGW(TAG, "conn=%d Battery Level subscribe failed, status=%d", conn_handle_, error->status);
+    }
+    OnBatteryDone();
+    return 0;
+}
+
+void AncsClient::OnBatteryDone() {
+    DiscoverService();
+}
+
+void AncsClient::SetBatteryLevel(const uint8_t* data, size_t len) {
+    if (len < 1 || data[0] > 100) {
+        ESP_LOGW(TAG, "conn=%d invalid Battery Level (%u bytes, %u)", conn_handle_, (unsigned)len,
+                 len ? data[0] : 0);
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(info_mutex_);
+        if (battery_level_ == data[0]) {
+            return;
+        }
+        battery_level_ = data[0];
+    }
+    ESP_LOGI(TAG, "conn=%d \"%s\" battery %u%%", conn_handle_, peer_name_.c_str(), data[0]);
 }
 
 void AncsClient::DiscoverService() {
@@ -569,6 +736,13 @@ void AncsClient::OnActionEvent(struct ble_npl_event* ev) {
 // ---------------------------------------------------------------------------
 
 bool AncsClient::OnNotifyRx(uint16_t attr_handle, struct os_mbuf* om) {
+    if (conn_handle_ != BLE_HS_CONN_HANDLE_NONE && battery_level_handle_ != 0 && attr_handle == battery_level_handle_) {
+        uint8_t value[1];
+        uint16_t len = std::min<uint16_t>(OS_MBUF_PKTLEN(om), sizeof(value));
+        os_mbuf_copydata(om, 0, len, value);
+        SetBatteryLevel(value, len);
+        return true;
+    }
     if (conn_handle_ == BLE_HS_CONN_HANDLE_NONE ||
         (attr_handle != notification_source_handle_ && attr_handle != data_source_handle_)) {
         return false;
@@ -791,6 +965,7 @@ void AncsClient::Emit(const AncsNotification& notification) {
     tagged.conn_handle = conn_handle_;
     tagged.peer_name = peer_name_;
     tagged.peer_address = peer_address_;
+    tagged.peer_battery = battery_level_;
     notification_callback_(tagged);
 }
 
@@ -841,6 +1016,51 @@ int AncsClient::OnTimeRead(uint16_t conn_handle, const struct ble_gatt_error* er
         return 0;  // Stale procedure from a previous connection
     }
     return self->HandleTimeRead(error, attr);
+}
+
+int AncsClient::OnBatteryServiceDiscovered(uint16_t conn_handle, const struct ble_gatt_error* error,
+                                           const struct ble_gatt_svc* service, void* arg) {
+    auto* self = static_cast<AncsClient*>(arg);
+    if (conn_handle != self->conn_handle_) {
+        return 0;  // Stale procedure from a previous connection
+    }
+    return self->HandleBatteryServiceDiscovered(error, service);
+}
+
+int AncsClient::OnBatteryLevelDiscovered(uint16_t conn_handle, const struct ble_gatt_error* error,
+                                         const struct ble_gatt_chr* chr, void* arg) {
+    auto* self = static_cast<AncsClient*>(arg);
+    if (conn_handle != self->conn_handle_) {
+        return 0;  // Stale procedure from a previous connection
+    }
+    return self->HandleBatteryLevelDiscovered(error, chr);
+}
+
+int AncsClient::OnBatteryLevelRead(uint16_t conn_handle, const struct ble_gatt_error* error,
+                                   struct ble_gatt_attr* attr, void* arg) {
+    auto* self = static_cast<AncsClient*>(arg);
+    if (conn_handle != self->conn_handle_) {
+        return 0;  // Stale procedure from a previous connection
+    }
+    return self->HandleBatteryLevelRead(error, attr);
+}
+
+int AncsClient::OnBatteryCccdDiscovered(uint16_t conn_handle, const struct ble_gatt_error* error,
+                                        uint16_t chr_val_handle, const struct ble_gatt_dsc* dsc, void* arg) {
+    auto* self = static_cast<AncsClient*>(arg);
+    if (conn_handle != self->conn_handle_) {
+        return 0;  // Stale procedure from a previous connection
+    }
+    return self->HandleBatteryCccdDiscovered(error, dsc);
+}
+
+int AncsClient::OnBatteryCccdWritten(uint16_t conn_handle, const struct ble_gatt_error* error,
+                                     struct ble_gatt_attr* attr, void* arg) {
+    auto* self = static_cast<AncsClient*>(arg);
+    if (conn_handle != self->conn_handle_) {
+        return 0;  // Stale procedure from a previous connection
+    }
+    return self->HandleBatteryCccdWritten(error);
 }
 
 int AncsClient::OnCccdWritten(uint16_t conn_handle, const struct ble_gatt_error* error,

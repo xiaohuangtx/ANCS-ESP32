@@ -46,7 +46,11 @@ bool AncsNotification::IsMessageTruncated() const {
 
 void AncsNotification::Print() const {
     printf("\n==================== ANCS Notification ====================\n");
-    printf("Device   : %s (%s)\n", peer_name.c_str(), peer_address.c_str());
+    if (peer_battery >= 0) {
+        printf("Device   : %s (%s), battery %d%%\n", peer_name.c_str(), peer_address.c_str(), peer_battery);
+    } else {
+        printf("Device   : %s (%s)\n", peer_name.c_str(), peer_address.c_str());
+    }
     printf("Event    : %s (uid=%lu)\n", AncsEventName(event_id), (unsigned long)uid);
     printf("Category : %s (count=%u)\n", AncsCategoryName(category_id), category_count);
     printf("Flags    : %s\n", FlagsToString(event_flags).c_str());
@@ -88,6 +92,9 @@ cJSON* AncsNotification::ToCJson() const {
     cJSON_AddStringToObject(root, "device", device_id.c_str());
     cJSON_AddStringToObject(root, "peer_name", peer_name.c_str());
     cJSON_AddStringToObject(root, "peer_address", peer_address.c_str());
+    if (peer_battery >= 0) {
+        cJSON_AddNumberToObject(root, "peer_battery", peer_battery);
+    }
     cJSON_AddStringToObject(root, "event", AncsEventName(event_id));
     cJSON_AddNumberToObject(root, "uid", uid);
     cJSON_AddStringToObject(root, "category", AncsCategoryName(category_id));

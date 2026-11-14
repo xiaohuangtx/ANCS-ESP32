@@ -220,6 +220,16 @@ int BleManager::GetConnectionCount() const {
     return count;
 }
 
+std::vector<AncsClient::PeerInfo> BleManager::GetPeers() const {
+    std::vector<AncsClient::PeerInfo> peers;
+    for (auto& link : links_) {
+        if (link.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+            peers.push_back(link.ancs.GetPeerInfo());
+        }
+    }
+    return peers;
+}
+
 void BleManager::SetNotificationCallback(AncsClient::NotificationCallback callback) {
     for (auto& link : links_) {
         link.ancs.SetNotificationCallback(callback);
