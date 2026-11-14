@@ -48,6 +48,12 @@ static std::string IpToString(uint32_t ip) {
 static void SetStaCredential(wifi_config_t& config, const std::string& ssid, const std::string& password) {
     memcpy(config.sta.ssid, ssid.data(), std::min(ssid.size(), sizeof(config.sta.ssid)));
     memcpy(config.sta.password, password.data(), std::min(password.size(), sizeof(config.sta.password)));
+    // A WPA passphrase is at least 8 chars. Set the threshold to WPA2 here,
+    // otherwise the driver raises it from OPEN on its own and logs a warning.
+    // Shorter passwords keep OPEN so open and WEP networks still connect.
+    if (password.size() >= 8) {
+        config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    }
     // Some WPA3 routers only accept hash-to-element
     config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
 }
